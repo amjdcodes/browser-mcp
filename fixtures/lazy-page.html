@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Lazy Page</title>
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        .hero {
+            height: 100vh;
+            background: #4a90d9;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+        }
+        .spacer { height: 2000px; background: #f0f0f0; }
+        #lazy-section {
+            min-height: 100vh;
+            background: #f8e71c;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+        #lazy-section .content { color: #333; }
+        .footer {
+            height: 100vh;
+            background: #333;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="hero">Hero Section</div>
+    <div class="spacer">Spacer (below fold)</div>
+
+    <!-- This section only renders its content when scrolled into view -->
+    <div id="lazy-section">
+        <div class="content">(not loaded yet)</div>
+    </div>
+
+    <div class="footer">Footer Section</div>
+
+    <script>
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.querySelector('.content').textContent = 'Lazy content loaded';
+                    observer.unobserve(entry.target);
+                    console.log('Lazy content loaded');
+                }
+            });
+        });
+        observer.observe(document.getElementById('lazy-section'));
+    </script>
+</body>
+</html>

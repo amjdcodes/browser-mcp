@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tall Page</title>
+    <style>
+        body { margin: 0; }
+        #top-bar {
+            width: 3000px;
+            height: 200px;
+            background: rgb(255, 0, 0); /* red */
+        }
+        #middle {
+            width: 3000px;
+            height: 19000px;
+            background: rgb(0, 255, 0); /* green */
+        }
+        #bottom-bar {
+            width: 3000px;
+            height: 200px;
+            background: rgb(0, 0, 255); /* blue */
+        }
+    </style>
+</head>
+<body>
+    <!-- 3000 x 19400 = 58.2M CSS pixels, well over the 16M limit -->
+    <div id="top-bar">TOP</div>
+    <div id="middle">MIDDLE</div>
+    <div id="bottom-bar">BOTTOM</div>
+    <script>
+        console.log('Tall page loaded');
+    </script>
+</body>
+</html>

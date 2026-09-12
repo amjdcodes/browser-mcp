@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Page - صفحة الاختبار</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .visible-text {
+            color: #333;
+        }
+        .hidden-text {
+            display: none;
+        }
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        input, textarea, select, button {
+            margin: 5px 0;
+            padding: 8px;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        #dynamic-content {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f0f0f0;
+        }
+        .editable {
+            min-height: 40px;
+            border: 1px solid #ccc;
+            padding: 8px;
+            background: #fff;
+        }
+        #interaction-form {
+            margin: 10px 0;
+        }
+        .echo {
+            margin-top: 4px;
+            padding: 4px 8px;
+            background: #e8f4e8;
+            border: 1px dashed #4a9;
+            font-family: monospace;
+            min-height: 20px;
+        }
+        #far-section {
+            margin-top: 2000px;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Page - صفحة الاختبار</h1>
+    
+    <div class="section">
+        <h2>Visible Text Content</h2>
+        <p class="visible-text" id="english-text">
+            This is visible English text that should be captured by browser_get_text.
+            It contains multiple lines and various characters.
+        </p>
+        <p class="visible-text" id="arabic-text" dir="rtl">
+            هذا نص عربي مرئي يجب أن يلتقطه browser_get_text.
+            يحتوي على أسطر متعددة وحروف متنوعة.
+        </p>
+        <p class="hidden-text" id="hidden-text">
+            This text is hidden and should NOT be captured.
+        </p>
+    </div>
+
+    <div class="section">
+        <h2>Interactive Elements</h2>
+        <form id="test-form">
+            <label for="text-input">Text Input:</label>
+            <input type="text" id="text-input" name="text-input" placeholder="Enter text here">
+            
+            <label for="textarea">Textarea:</label>
+            <textarea id="textarea" name="textarea" rows="3" placeholder="Enter longer text"></textarea>
+            
+            <label for="select">Select:</label>
+            <select id="select" name="select">
+                <option value="option1">Option 1</option>
+                <option value="option2">Option 2</option>
+                <option value="option3">Option 3</option>
+            </select>
+            
+            <label>
+                <input type="checkbox" id="checkbox" name="checkbox">
+                Checkbox
+            </label>
+            
+            <label>
+                <input type="radio" id="radio1" name="radio" value="radio1">
+                Radio 1
+            </label>
+            <label>
+                <input type="radio" id="radio2" name="radio" value="radio2">
+                Radio 2
+            </label>
+            
+            <button type="button" id="submit-btn" onclick="handleSubmit()">Submit</button>
+            <button type="button" id="log-btn" onclick="handleLog()">Log Message</button>
+            <button type="button" id="error-btn" onclick="handleError()">Trigger Error</button>
+        </form>
+    </div>
+
+    <div class="section">
+        <h2>Links</h2>
+        <a href="#" id="link1" onclick="event.preventDefault(); alert('Link 1 clicked');">Link 1</a>
+        <a href="#" id="link2" onclick="event.preventDefault(); alert('Link 2 clicked');">Link 2</a>
+    </div>
+
+    <div class="section">
+        <h2>Dynamic Content</h2>
+        <button type="button" id="show-dynamic-btn" onclick="showDynamicContent()">Show Dynamic Content</button>
+        <div id="dynamic-content" style="display: none;">
+            <p id="dynamic-text">This content appears after clicking the button.</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Interaction Testing</h2>
+        <p id="click-result">Click the button to change this text</p>
+        <button type="button" id="change-text-btn">Change Text</button>
+
+        <p>
+            <a href="/page2.html" id="nav-link">Navigate to Page 2</a>
+        </p>
+
+        <p>
+            <label for="editable-div">Editable Div:</label>
+            <div id="editable-div" contenteditable="true" class="editable">Initial editable content</div>
+        </p>
+
+        <button type="button" id="hidden-btn" style="display: none;">Hidden Button</button>
+
+        <div id="dynamic-slot"></div>
+
+        <form id="interaction-form">
+            <label for="form-input">Form Input:</label>
+            <input type="text" id="form-input" name="form-input" placeholder="Form input">
+            <button type="submit" id="form-submit-btn">Submit Form</button>
+        </form>
+    </div>
+
+    <div class="section">
+        <h2>Typed Value Echoes</h2>
+        <p>Text input echo: <span id="input-echo" class="echo">(empty)</span></p>
+        <p>Textarea echo: <span id="textarea-echo" class="echo">(empty)</span></p>
+    </div>
+
+    <div id="far-section">
+        <h2>Far Below The Fold</h2>
+        <p>This section is placed far down the page to test automatic scrolling before clicking.</p>
+        <button type="button" id="far-btn">Far Button</button>
+        <p id="far-result">Far button not clicked yet</p>
+    </div>
+
+    <div style="height: 1500px;"></div>
+
+    <div id="overlay-test-area" style="position: relative; height: 600px; border: 1px solid #ccc; padding: 20px;">
+        <h2>Overlay Click Testing</h2>
+        <p id="overlay-result">No overlay button clicked yet</p>
+        <button id="partially-covered" style="position: absolute; top: 60px; left: 20px; width: 300px; height: 200px; z-index: 1;">Partially Covered Button</button>
+        <div id="cover-band" style="position: absolute; top: 130px; left: 20px; width: 300px; height: 40px; background: rgba(255, 0, 0, 0.6); z-index: 10;"></div>
+        <button id="fully-covered" style="position: absolute; top: 320px; left: 20px; width: 200px; height: 100px; z-index: 1;">Fully Covered Button</button>
+        <div id="full-overlay" style="position: absolute; top: 300px; left: 0; width: 400px; height: 150px; background: rgba(0, 0, 255, 0.6); z-index: 10;"></div>
+        <div id="wide-content" style="width: 2000px; height: 20px; margin-top: 40px; background: #eee;">wide horizontal content</div>
+    </div>
+
+    <div class="section">
+        <h2>Console Output</h2>
+        <p>Open browser console to see messages. Click buttons above to trigger console output.</p>
+    </div>
+
+    <script>
+        // Console messages on page load
+        console.log('Page loaded successfully');
+        console.warn('This is a warning message');
+        console.info('This is an info message');
+        
+        function handleSubmit() {
+            console.log('Submit button clicked');
+            const textInput = document.getElementById('text-input').value;
+            console.log('Text input value:', textInput);
+            alert('Form submitted!');
+        }
+        
+        function handleLog() {
+            console.log('Log button clicked');
+            console.log('Current timestamp:', new Date().toISOString());
+        }
+        
+        function handleError() {
+            console.error('Error button clicked - this is an error');
+            try {
+                throw new Error('This is a test error');
+            } catch (e) {
+                console.error('Caught error:', e.message);
+            }
+        }
+        
+        function showDynamicContent() {
+            console.log('Dynamic content button clicked');
+            const dynamicDiv = document.getElementById('dynamic-content');
+            dynamicDiv.style.display = 'block';
+            console.log('Dynamic content shown');
+        }
+        
+        // --- Interaction testing handlers ---
+        
+        function updateEcho(sourceId, echoId) {
+            const source = document.getElementById(sourceId);
+            const echo = document.getElementById(echoId);
+            if (source && echo) {
+                echo.textContent = source.value || '(empty)';
+            }
+        }
+        
+        // Button that changes text when clicked
+        const changeTextBtn = document.getElementById('change-text-btn');
+        if (changeTextBtn) {
+            changeTextBtn.addEventListener('click', function() {
+                document.getElementById('click-result').textContent = 'Text changed by button click!';
+                console.log('Change text button clicked');
+            });
+        }
+        
+        // Element that appears after 2 seconds (for wait_for testing). Created
+        // dynamically so it does NOT exist in the DOM until the delay elapses.
+        setTimeout(function() {
+            const p = document.createElement('p');
+            p.id = 'delayed-element';
+            p.textContent = 'Delayed element appears after 2 seconds';
+            const slot = document.getElementById('dynamic-slot');
+            if (slot) slot.appendChild(p);
+            console.log('Delayed element shown');
+        }, 2000);
+        
+        // Element that appears after 4 seconds (longer-delay wait testing).
+        setTimeout(function() {
+            const p = document.createElement('p');
+            p.id = 'delayed-element-4s';
+            p.textContent = 'Delayed element appears after 4 seconds';
+            const slot = document.getElementById('dynamic-slot');
+            if (slot) slot.appendChild(p);
+            console.log('Delayed 4s element shown');
+        }, 4000);
+        
+        // Form with submit handler
+        const interactionForm = document.getElementById('interaction-form');
+        if (interactionForm) {
+            interactionForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+                const input = document.getElementById('form-input').value;
+                document.getElementById('click-result').textContent = 'Form submitted: ' + input;
+                console.log('Form submitted with value:', input);
+            });
+        }
+        
+        // Live echoes of typed values (input/textarea) for verification
+        const textInput = document.getElementById('text-input');
+        if (textInput) {
+            textInput.addEventListener('input', function() { updateEcho('text-input', 'input-echo'); });
+            textInput.addEventListener('change', function() { updateEcho('text-input', 'input-echo'); });
+        }
+        const textareaEl = document.getElementById('textarea');
+        if (textareaEl) {
+            textareaEl.addEventListener('input', function() { updateEcho('textarea', 'textarea-echo'); });
+            textareaEl.addEventListener('change', function() { updateEcho('textarea', 'textarea-echo'); });
+        }
+        
+        // Far button (below the fold) for scroll-into-view click testing
+        const farBtn = document.getElementById('far-btn');
+        if (farBtn) {
+            farBtn.addEventListener('click', function() {
+                document.getElementById('far-result').textContent = 'Far button clicked!';
+                console.log('Far button clicked');
+            });
+        }
+        
+        // Overlay click-testing buttons
+        const partiallyCovered = document.getElementById('partially-covered');
+        if (partiallyCovered) {
+            partiallyCovered.addEventListener('click', function() {
+                document.getElementById('overlay-result').textContent = 'Partially covered button clicked (quadrant hit)';
+                console.log('Partially covered button clicked');
+            });
+        }
+        const fullyCovered = document.getElementById('fully-covered');
+        if (fullyCovered) {
+            fullyCovered.addEventListener('click', function() {
+                document.getElementById('overlay-result').textContent = 'Fully covered button clicked (forced)';
+                console.log('Fully covered button clicked');
+            });
+        }
+        
+        // Add some delayed console messages
+        setTimeout(() => {
+            console.log('Delayed message after 1 second');
+        }, 1000);
+        
+        setTimeout(() => {
+            console.warn('Delayed warning after 2 seconds');
+        }, 2000);
+    </script>
+</body>
+</html>

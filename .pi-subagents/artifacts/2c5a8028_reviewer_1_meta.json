@@ -1,0 +1,174 @@
+{
+  "runId": "2c5a8028",
+  "agent": "reviewer",
+  "task": "[Read from: /root/browser-mcp/plan.md, /root/browser-mcp/progress.md]\n\nPerform a thorough SECURITY VULNERABILITY review of the /root/browser-mcp codebase (MCP server for headless Chromium automation via raw CDP, stdio transport). Review all source files: index.js, src/browser.js, src/cdp.js, src/console-buffer.js, src/helpers.js, src/lock.js, src/utils.js, package.json. Focus on: URL validation bypasses in src/utils.js (file:/javascript:/data:/blob:/about: rejection, private IP blocking incl. decimal/octal/hex IPs, trailing dots, userinfo, IDN, IPv6 forms, redirects), path traversal in screenshot output, injection risks (CDP command injection, spawn argument injection in browser.js, prototype pollution, log injection), SSRF reach, secrets handling (.env.example), resource exhaustion (unbounded console buffer, huge screenshots/pages), race conditions with security impact, unvalidated MCP tool input that could crash or compromise the server. Rate each finding critical/high/medium/low/info with file:line evidence and concrete mitigation. Verify every claim — do not invent issues. Read-only — do NOT edit anything. Return a structured security report.",
+  "exitCode": 0,
+  "processSignal": "SIGTERM",
+  "usage": {
+    "input": 40738,
+    "output": 31786,
+    "cacheRead": 367232,
+    "cacheWrite": 0,
+    "cost": 0.0156316496,
+    "turns": 12
+  },
+  "model": "opencode-go/deepseek-v4-flash:high",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 40738,
+        "output": 31786,
+        "cacheRead": 367232,
+        "cacheWrite": 0,
+        "cost": 0.0156316496,
+        "turns": 12
+      }
+    }
+  ],
+  "durationMs": 425991,
+  "toolCount": 26,
+  "launchContractDigest": "4b30b5056658f2b360f84799e518ca939c304a02584a7b27a2dd710a67c18bea",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:51a9b93ec8cd5030"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:51a9b93ec8cd5030"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Returned concrete findings with file:line evidence and severity ratings for all claimed vulnerabilities. Empirical verification: live Node probe of validateURL showed 169.254.169.254, [::ffff:10.0.0.1], [::ffff:169.254.169.254], 0.0.0.0, 127.0.0.2, 0x0A000001-normalized, localhost. all accepted or correctly handled as described; live Chromium probe proved [::ffff:127.0.0.1] reaches IPv4 loopback services; code inspection proved redirects are never re-validated (index.js:196,211) and truncateBuffer/MAX_IMAGE_BYTES is dead code (no call sites). All findings cited as severity + file:line."
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "node -e validateURL probe (23 bypass/edge URLs)",
+          "result": "passed",
+          "summary": "Confirmed 169.254.169.254, [::ffff:10.0.0.1], [::ffff:169.254.169.254], 0.0.0.0, 127.0.0.2, 100.64.0.1, 198.18.0.1, 240.0.0.1, [::1], localhost. pass validation; decimal/hex/octal forms normalize to dotted quad (0x0A000001 blocked)"
+        },
+        {
+          "command": "chromium --headless --dump-dom probes (IPv4-mapped, 127.0.0.2, 0.0.0.0, circled digits, trailing dot)",
+          "result": "failed",
+          "summary": "IPv4-mapped probe succeeded (server received request from [::ffff:7f00:1]) proving mapped-address reachability; unroutable/circled-digit probes aborted in container, so IDN divergence could not be fully tested (noted as residual risk)"
+        },
+        {
+          "command": "grep-based static verification (truncateBuffer call sites, getChromiumVersion calls, readdirSync import, ALLOWED_HOSTS match, secrets scan, test coverage)",
+          "result": "passed",
+          "summary": "Confirmed dead code (truncateBuffer, getChromiumVersion, _killChildrenByProfile via missing readdirSync import), never-matching '::1' allowlist entry, no secrets, and absent SSRF-bypass test coverage"
+        }
+      ],
+      "validationOutput": [
+        "HIGH: SSRF via 169.254.169.254 link-local metadata not blocked (src/utils.js:69-77, validateURL at 41-64)",
+        "HIGH: SSRF via IPv4-mapped IPv6 [::ffff:X] and all IPv6 (src/utils.js:69-77; empirically proven reachability)",
+        "HIGH: Redirect-based SSRF, finalUrl never re-validated (index.js:196,211; MAX_REDIRECTS not implemented)",
+        "MEDIUM: unblocked 0.0.0.0/127.0.0.2/100.64/10/198.18/15/240/4; over-blocked public 172.0-15",
+        "MEDIUM: unbounded per-message console buffer (src/browser.js:257,269; src/console-buffer.js count-only cap)",
+        "MEDIUM: screenshot base64 response uncapped, MAX_IMAGE_BYTES/truncateBuffer dead (index.js:451-460; src/utils.js:131)",
+        "LOW: URL userinfo credentials logged to stderr (index.js:182)",
+        "LOW: dialog message log injection (src/browser.js:345-346)",
+        "LOW: unescaped attribute values in snapshot selectors, functional only (index.js:316-345)",
+        "INFO: readdirSync not imported (src/browser.js:395); getChromiumVersion dead ESM-require/execSync code (src/browser.js:86-91); '::1' allowlist entry never matches; validateSafePath startsWith latent prefix bug (src/utils.js:99); test gap (tests/utils.test.js:71-75)",
+        "NO exploitable path traversal, NO CDP command injection, NO spawn argument injection, NO prototype pollution, NO secret leakage found (verified)"
+      ],
+      "residualRisks": [
+        "DNS rebinding: URL validation is string-based; Chromium resolves at fetch time — needs post-resolution IP re-validation",
+        "Node vs Chromium IDNA/circled-digit mapping divergence could not be fully excluded (Chromium aborted on unroutable hosts in this container); IP-range validation per finding 1-2 covers the class",
+        "Localhost (127.0.0.1) reachable by design; wildcard-bound local services also reachable via 127.0.0.2/0.0.0.0 — acceptable only if localhost trust is intended",
+        "Local same-host trust (tmpdir profile dir, /proc scan, operator-controlled env vars) assumes a non-hostile host operator"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Read-only security review; no files changed",
+      "reviewFindings": [
+        "high: src/utils.js:69-77 - SSRF to 169.254.169.254 link-local/cloud metadata not blocked (validated live)",
+        "high: src/utils.js:69-77 - IPv4-mapped IPv6 [::ffff:X] private/metadata addresses not blocked; Chromium reachability empirically proven",
+        "high: index.js:196,211 - redirect chains never re-validated (finalUrl reported, not checked); MAX_REDIRECTS unimplemented",
+        "medium: src/utils.js:73 - block list misses 0.0.0.0/8, 127/8 (non-.1), 100.64/10, 169.254/16, 198.18/15, 240/4; over-blocks public 172.0-15",
+        "medium: src/browser.js:257,269 + src/console-buffer.js - console messages capped by count (500) not bytes; multi-MB JSON responses possible",
+        "medium: index.js:451-460 - screenshot base64 returned uncapped; truncateBuffer/MAX_IMAGE_BYTES (src/utils.js:131) dead code",
+        "low: index.js:182 - raw URL (incl. userinfo credentials) logged to stderr",
+        "low: src/browser.js:345-346 - page-controlled dialog text logged raw (log spoofing)",
+        "low: index.js:316-345 - snapshot CSS selectors built from unescaped DOM attribute values (functional only)",
+        "info: src/browser.js:395 - readdirSync not imported; _killChildrenByProfile dead code",
+        "info: src/browser.js:86-91 - getChromiumVersion dead code: ESM require() + shell-interpolated execSync",
+        "info: src/utils.js:5 - '::1' allowlist entry never matches bracketed IPv6 hostnames",
+        "info: tests/utils.test.js:71-75 - no coverage of any SSRF bypass form",
+        "no blockers found in: path traversal (validateSafePath), CDP/spawn injection, prototype pollution, secrets handling"
+      ],
+      "manualNotes": "No plan.md/progress.md present at /root/browser-mcp (ENOENT) despite task reference; review proceeded from source. All claims empirically or statically verified. Report is read-only; no edits made."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/root/browser-mcp/.pi-subagents/artifacts/2c5a8028_reviewer_1_transcript.jsonl",
+  "timestamp": 1786024707228
+}
