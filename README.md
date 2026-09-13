@@ -155,8 +155,8 @@ browser-mcp/
 ### Installation
 
 ```bash
-# 1. Clone the repository (substitute your fork/remote URL)
-git clone https://github.com/<your-org>/browser-mcp.git
+# 1. Clone the repository
+git clone https://github.com/amjdcodes/browser-mcp.git
 cd browser-mcp
 
 # 2. Install dependencies
