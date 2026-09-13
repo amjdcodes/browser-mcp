@@ -498,4 +498,4 @@ Contributions are welcome. Before opening a pull request:
 
 ## License
 
-Released under the MIT License. The license is declared in [`package.json`](package.json); add a `LICENSE` file at the repository root if you redistribute the project.
+This project is licensed under the [MIT License](LICENSE).

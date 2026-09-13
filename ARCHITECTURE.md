@@ -37,9 +37,6 @@ browser-mcp/
 │   ├── test-page.html          # Shared HTML test fixture (interactive)
 │   └── page2.html              # Navigation target for click tests
 ├── screenshots/                # Screenshot output directory (runtime)
-├── python-files/               # Manual integration test scripts (not part of npm test)
-├── markdown-files/             # Documentation and test reports
-├── task-files/                 # Task descriptions and requirements
 └── node_modules/               # Dependencies
 ```
 
@@ -471,7 +468,6 @@ See `.env.example` for the full documented list (including reserved variables). 
 
 - **Unit tests**: `node --test tests/*.test.js`
 - **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js` (spawn real Chromium)
-- **Manual tests**: `python-files/` (not part of `npm test`) — includes `test-interaction.py`
 - **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`
 
 **Test Coverage**:

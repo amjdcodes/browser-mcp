@@ -11,7 +11,6 @@ npm test                            # run all tests (node:test, concurrency 3 â€
 node --test tests/interaction.test.js   # run a single test file
 node index.js                       # start the MCP server (stdio transport)
 ./install-chromium.sh               # install Chromium (Debian/Ubuntu; idempotent, --dry-run to preview)
-python3 python-files/test-interaction.py  # manual MCP-client integration checks (not part of npm test)
 ```
 
 No lint, typecheck, or build step exists.
@@ -55,7 +54,6 @@ No lint, typecheck, or build step exists.
 ## Test conventions
 
 - Tests use `node:test` with `node:assert/strict` â€” no external test framework.
-- `python-files/` contains manual integration test scripts (not part of `npm test`).
 - `fixtures/test-page.html` is the shared test fixture (also `fixtures/page2.html` for navigation tests).
 - `npm test` uses `--test-concurrency=3`: 13+ files each spawn Chromium; full parallelism exhausts RAM on small devices.
 
