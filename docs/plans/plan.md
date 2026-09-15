@@ -56,19 +56,21 @@
 
 **الوصف للمستخدم:** `Resize the browser viewport (width/height, presets, or reset to default)`.
 
-**الـ Schema المقترح:**
+**الـ Schema المقترح (محدَّث — بلا `.default()`):**
 
 ```js
 {
   preset: z.enum(['mobile', 'tablet', 'desktop']).optional(),
   width:  z.number().int().min(100).max(10000).optional(),
   height: z.number().int().min(100).max(10000).optional(),
-  device_scale_factor: z.number().min(1).max(4).optional().default(1),
-  mobile: z.boolean().optional().default(false),
-  reset:  z.boolean().optional().default(false),
-  timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  device_scale_factor: z.number().min(1).max(4).optional(),
+  mobile: z.boolean().optional(),
+  reset:  z.boolean().optional(),
+  timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional()
 }
 ```
+
+> ⚠️ **لا تستخدم `.default()` على هذه الحقول.** أثبت الاختبار العملي أن القيم الافتراضية تصل إلى المعالج فتُبطل التمييز بين «صريح» و«افتراضي»؛ النتيجة: `reset` يُرفض دائماً ويستحيل اكتشاف نداء فارغ `{}`. تُطبَّق الافتراضات داخل `resolveViewportParams(args)` **بعد** التحقق (انظر §13).
 
 **قواعد التحقق (ترجع `INVALID_ARGS`):**
 - ثلاث طرق حصرية: `reset` **أو** `preset` **أو** (`width` + `height`).
@@ -76,6 +78,8 @@
 - `width` بدون `height` (أو العكس) مرفوض.
 - `reset` لا يُقبل مع أي خيار آخر.
 - إن لم يُقدَّم أي شيء → `INVALID_ARGS`.
+
+> **التحقق يجري على المدخل الخام** عبر `resolveViewportParams(args)` في `src/viewport.js` (وليس على ناتج Zod المُطبَّع).
 
 **الإعدادات الجاهزة (`preset`):**
 
@@ -276,6 +280,8 @@ try {
 
 > **بالضبط في الكتلة `finally` الحالية (سطر `if (emulationSet)`) التي تستدعي `clearDeviceMetricsOverride`.**
 
+> **إضافة مطلوبة في نفس دالة `browser_screenshot`:** كتلة حدّ البكسل الحالية تنفّذ `clip.scale` بينما `clip` **غير معرّف** في مسار الـ viewport (انهيار مؤكَّد عند resize كبير). الحل المُثبَّت في §13.1: تصغير viewport عبر `clip` + `captureBeyondViewport:true` + احتساب `deviceScaleFactor`.
+
 ### 5.3 اعتبارات
 - اللقطة الكاملة مع `mobile:true` قد تُنتج مقاساً مختلفاً؛ سنثبّت `mobile:false` وقت الالتقاط ثم نستعيد الحالة — موثّق.
 - `browser_resize` مع `reset` يعيد المتصفح للمقاس الافتراضي (`800x600` تقريباً) الموثّق في التقرير.
@@ -413,6 +419,8 @@ try {
 | ازدحام القفل بسبب إقفال evaluate | منخفض | منخفض | توثيق السلوك؛ يمكن لاحقاً فتح خيار `read_only` غير مقفول |
 | تعارض `mobile:true` مع full_page | منخفض | منخفض | تثبيت `mobile:false` وقت الالتقاط ثم الاستعادة |
 
+> **تحديث 2026-09-14:** العطلان الحرجان (مسح resize بعد `full_page`، وفقدان viewport بعد crash/reconnect) جرى حلّهما والتحقق منهما عملياً — انظر §13. كما صُحّح فهم «فقدان viewport عند إعادة الاتصال»: القياس يُثبت بقاء الـ override بعد إعادة اتصال WebSocket، ويُفقد فقط عند إعادة تشغيل العملية بعد crash.
+
 **خطة التراجع:** كل التغييرات في ملفات إضافية جديدة أو تعديلات معزولة؛ التراجع عبر `git checkout -- <file>` لكل ملف، وحذف الملفات الجديدة. لا تغييرات هيكلية أو migrations.
 
 ---
@@ -427,3 +435,223 @@ try {
 - [ ] `npm test` كامل أخضر، ولا عمليات Chromium متبقية.
 - [ ] `README.md` + `ARCHITECTURE.md` + `AGENTS.md` + `.env.example` محدّثة ومتزامنة مع الكود.
 - [ ] لا تعديل على `src/cdp.js` ولا على منطق ارتباط الطلبات.
+
+---
+
+## 13. تحديث (2026-09-14): الحلول المؤكَّدة للعطلين الحرجين P0
+
+> طُبِّقت هذه الحلول واختُبرت في **بيئة sandbox معزولة** (نسخة من المشروع) دون أي تعديل على كود المشروع. التفاصيل الكاملة والأدلة في [`docs/reports/solutions.md`](../reports/solutions.md).
+
+### 13.1 حل P0-1 — الانهيار في `browser_screenshot` بعد `resize`
+
+**السبب:** في مسار اللقطة الجزئية لا يُبنى `clip` (يُترك `undefined`)، لكن كتلة الحد تنفّذ `clip.scale = …` → `TypeError`. تُفعَّل عند مقاس > `MAX_SCREENSHOT_PIXELS` (وحدود `resize` تسمح بـ `10000×10000 = 100MP`).
+
+**الحل (مُثبَّت عملياً):** استبدال حساب البكسل بمنطق يفرّق بين المسارين ويحتسب `deviceScaleFactor`:
+
+```js
+const captureDsf = (!clip && browser.viewport && browser.viewport.deviceScaleFactor) || 1;
+const baseSize = clip ?? captureSize;
+const totalPixels = baseSize.width * baseSize.height * captureDsf * captureDsf;
+if (totalPixels > MAX_SCREENSHOT_PIXELS) {
+  const scaleFactor = Math.sqrt(MAX_SCREENSHOT_PIXELS / totalPixels);
+  if (clip) {
+    clip.scale = scaleFactor;                 // full_page — كما كان
+  } else {
+    // viewport: clip على مستطيل العرض الحالي + captureBeyondViewport:true
+    const v = metrics.cssVisualViewport || metrics.visualViewport || metrics.layoutViewport;
+    clip = { x: v.pageX || 0, y: v.pageY || 0,
+             width: v.clientWidth, height: v.clientHeight, scale: scaleFactor };
+    captureBeyondViewport = true;
+  }
+  truncated = true;
+}
+```
+
+كما تبقى حماية §5.2 (استعادة `previousViewport` في `finally`) لازمة حتى لا تُلغي لقطة `full_page` أي resize سابق.
+
+**الدليل:** قبل الإصلاح `resize 5000×5000 → screenshot` أعاد `Cannot set properties of undefined (setting 'scale')`؛ بعده أعاد `isError=false` مع `truncated=true` وصورة `≈4000×4000`. واختبارات التكامل (12/12) تشمل: التصغير ضمن الحد، dSF=3، البقاء بعد navigation، والبقاء بعد `full_page`.
+
+### 13.2 حل P0-2 — `Zod` مع `reset`
+
+**السبب:** `.default()` على حقول المخطط يجعل القيم الافتراضية تصل إلى المعالج دائماً، فيُرفض `reset` أبداً ويستحيل اكتشاف `{}`.
+
+**الحل (مُثبَّت عملياً):** إزالة `.default()` من المخطط، ونقل التحقق إلى `resolveViewportParams(args)` على المدخل الخام:
+
+- `reset` وحدها → `{ mode:'reset' }`؛ `reset` مع أي خيار → `INVALID_ARGS`.
+- `preset` وحدها (مع تجاوز اختياري لـ `device_scale_factor`/`mobile`)؛ `preset` مع `width`/`height` → `INVALID_ARGS`.
+- `width`+`height` → تطبيق مباشر؛ أحدهما دون الآخر → `INVALID_ARGS`.
+- لا شيء أو `reset:false` وحدها → `INVALID_ARGS`.
+
+**الدليل:** 12/12 اختبار وحدة + 6/6 اختبار تكامل (منها `{}` و`{reset:true}` و`{reset:true,width,height}`).
+
+### 13.3 نتائج الانحدار
+
+أُعيد تشغيل مجموعة اختبارات المشروع على الكود المُرقَّع تسلسلياً (تزامن 1): **173/173 نجحت، 0 فشل** (بما فيها اختبار «reset emulation after full_page screenshot»). تُرك `memory.test.js` (7 اختبارات، 50 دورة) دون تشغيل احترازياً لضغط الذاكرة، وهو غير متأثر بالتعديل.
+
+### 13.4 اكتشافات إضافية يجب مراعاتها عند التنفيذ
+
+- **`deviceScaleFactor` يضاعف دقّة اللقطة:** أُضيف `dSF²` إلى حساب البكسل. (`500×700 @3 → 1500×2100`.)
+- **`Emulation.scale` لا يُصغّر اللقطات** — الصقل الصحيح عبر `clip.scale` فقط.
+- **override الخاص بـ Emulation يبقى بعد إعادة اتصال WebSocket** (تحقّقنا عملياً)؛ لذا `_reapplyViewport` مطلوب فعلياً لإعادة التشغيل بعد crash، وزائد (غير ضار) على الـ reconnect.
+- **المقاس الافتراضي الفعلي `780×437`** لا `800×600`.
+- **ملاحظة متبقّية:** `mobile:true` يُضيف page-scale فتصبح اللقطة أكبر من تقدير `w×h×dSF²` (preset الجوال ≈ `16MP` فعلياً). الحل الكامل في **§14**.
+
+---
+
+## 14. معالجة `mobile:true` + viewport كبير + `screenshot` (التحقق بعد الالتقاط وإعادة التصغير)
+
+> هذا القسم يعالج الحالة التي يفشل فيها التقدير المسبق للبكسل: **`mobile:true` مع viewport كبير**. المبدأ: **لا نثق بالحساب النظري وحده**؛ المرجع النهائي هو **قياس الصورة الفعلية بعد الالتقاط**، ثم إعادة التصغير عند التجاوز.
+
+### 14.1 المشكلة بدقّة
+
+- `mobile:true` يُفعّل **page-scale** في Chromium (تحجيم viewport الجوّال)، فيصبح عدد بكسلات الصورة الفعلية أكبر من `width × height × deviceScaleFactor²`.
+- قياس فعلي: preset الجوال (`390×844`, `dSF=3`, `mobile:true`) ينتج صورة **`2719×5882 ≈ 15.99MP`**، بينما التقدير `390×844×9 = 2.96MP` فقط (فرق ≈ 5.4×).
+- كذلك `MAX_IMAGE_BYTES` **غير مطبَّق** حالياً على اللقطات إطلاقاً، فإن تجاوزت الصورة حدّ البايتات لا يوجد ما يمنعها.
+- الأثر العملي: قد تتجاوز اللقطة `MAX_SCREENSHOT_PIXELS` بصمت، وقد تُنتج payload ضخماً يستهلك الذاكرة ونقل stdio.
+
+### 14.2 المبدأ: مصدران للحقيقة
+
+نعتمد **طبقتين متكاملتين**:
+
+1. **طبقة تقدير مسبق (best-effort):** تقرأ `visualViewport.scale` وتستخدمه لتقليل احتمال الحاجة إلى التقاط ثانٍ.
+2. **طبقة تحقق بعد الالتقاط (المرجع الموثوق):** تفكّ ترميز أبعاد الصورة الحقيقية وتقيس `buffer.length`؛ وإن تجاوزت الحدود تُعيد التصغير بـ `clip.scale` ثم تُعيد الالتقاط (بمحاولات محدودة).
+
+> الطبقة (2) وحدها كافية لضمان عدم تجاوز الحد؛ والطبقة (1) تحسين للأداء فقط (تجنّب لقطة ثانية في الحالات الشائعة).
+
+### 14.3 الطبقة 1 — تقدير مسبق عبر `visualViewport.scale`
+
+من `Page.getLayoutMetrics` نحصل على `cssVisualViewport` التي تحوي: `clientWidth`, `clientHeight`, `pageX`, `pageY`, **`scale`** (page-scale)، إضافةً إلى `deviceScaleFactor` المخزّن في `browser.viewport`.
+
+التقدير التقريبي (مع هامش أمان):
+
+```
+effectiveScale  ≈ deviceScaleFactor / max(visualViewport.scale, ε)   // page-scale يقلّص viewport المنطقي
+estPixels       ≈ cssWidth × cssHeight × effectiveScale²
+```
+
+- إن كان `estPixels > MAX_SCREENSHOT_PIXELS` → نبدأ مباشرةً بـ `clip.scale = sqrt(MAX_SCREENSHOT_PIXELS / estPixels) * 0.98`.
+- نستخدم هامش `0.98` لأن التقدير **تقريبي**؛ والمرجع يبقى الطبقة (2).
+- إن كان التقدير ≤ الحد → نلتقط بلا تصغير (المسار السريع الحالي).
+
+> هذه الطبقة **اختيارية**: يمكن حذفها والاعتماد كلياً على الطبقة (2) مقابل تكلفة لقطة ثانية عند التجاوز.
+
+### 14.4 الطبقة 2 — التحقق بعد الالتقاط (الجوهر)
+
+بعد كل التقاط، وقبل إرجاع النتيجة:
+
+1. **الأبعاد الحقيقية:** فكّ ترميز رأس الصورة من الـ `Buffer` (انظر §14.5).
+2. **حجم البايتات:** `buffer.length`.
+3. الحكم:
+   - `overPixels = width × height > MAX_SCREENSHOT_PIXELS`
+   - `overBytes  = buffer.length > MAX_IMAGE_BYTES`
+4. إن لم يتجاوز أياً منهما → أعِد النتيجة (`truncated` حسب هل حدث تصغير أم لا).
+5. إن تجاوز → احسب معامل تصحيح وأعِد الالتقاط (انظر §14.6)، بحدّ أقصى للمحاولات.
+
+### 14.5 قراءة الأبعاد الحقيقية من الصورة (بلا مكتبات خارجية)
+
+- **PNG:** العرض/الارتفاع في مقطع `IHDR` عند الإزاحات `16` و`20` (Big-Endian):
+  ```js
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  ```
+- **JPEG:** امسح العلامات بحثاً عن `SOF0..SOF3 / SOF5..SOF7 / SOF9..SOF11 / SOF13..SOF15` (نطاق `0xFFC0–0xFFCF` باستثناء `0xC4` و`0xC8` و`0xCC`)، ثم اقرأ `height` (2 بايت) فـ `width` (2 بايت).
+- إن فشل التحليل لأي سبب → أعِد `null` واعتبر التقدير المسبق (§14.3) بديلاً، مع وسم النتيجة `measured: false` للتشخيص.
+
+> الصيغتان المدعومتان هما `png` و`jpeg` فقط، لذا لا حاجة لدعم WebP.
+
+### 14.6 معادلة إعادة التصغير وإعادة الالتقاط
+
+```
+fPix  = overPixels ? sqrt(MAX_SCREENSHOT_PIXELS / (width × height)) : 1
+fByte = overBytes  ? sqrt(MAX_IMAGE_BYTES / buffer.length)          : 1
+f     = min(fPix, fByte) × 0.98          // هامش أمان
+newScale = (currentScale ?? 1) × f       // currentScale = 1 للمسار بلا clip
+```
+
+ثم:
+
+- **إن كان الالتقاط مكتنفاً بـ `full_page` (يوجد `clip` مسبقاً):** عدّل `clip.scale = newScale` وأعِد الالتقاط بنفس `clip` و`captureBeyondViewport:true`.
+- **إن كان التقاط viewport بلا `clip`:** ابنِ `clip` لمستطيل العرض الحالي (كما في §13.1):
+  ```js
+  const v = metrics.cssVisualViewport || metrics.visualViewport || metrics.layoutViewport;
+  clip = { x: v.pageX || 0, y: v.pageY || 0,
+           width: v.clientWidth, height: v.clientHeight, scale: newScale };
+  captureBeyondViewport = true;            // يمنع الإطار الفارغ على الصفحات المُمرَّرة
+  ```
+- الأبعاد الناتجة = `clip.width × clip.scale × deviceScaleFactor` (مُتحقَّق منها عملياً).
+
+### 14.7 الخوارزمية الكاملة (pseudo-code)
+
+```js
+const MAX_CAPTURE_ATTEMPTS = 2;   // لقطة أولى + تصحيح واحد
+
+async function captureWithinLimits({ format, quality, full_page }) {
+  let clipScale = estimateInitialScale();     // §14.3 (قد تكون 1)
+  let result;
+
+  for (let attempt = 0; attempt < MAX_CAPTURE_ATTEMPTS; attempt++) {
+    result = await doCapture({ format, quality, full_page, clipScale }); // يبني clip كما في §14.6
+    const dims  = decodeImageSize(result.buffer, format);                // §14.5
+    const bytes = result.buffer.length;
+
+    const overPixels = dims && dims.width * dims.height > MAX_SCREENSHOT_PIXELS;
+    const overBytes  = bytes > MAX_IMAGE_BYTES;
+    if (!overPixels && !overBytes) {
+      return { ...result, dims, bytes, truncated: attempt > 0, measured: !!dims };
+    }
+
+    clipScale = computeNewScale(clipScale, dims, bytes);   // §14.6
+    process.stderr.write(`[MCP] Screenshot over limit (px=${dims?.width}x${dims?.height}, bytes=${bytes}); re-capturing scale=${clipScale.toFixed(3)}\n`);
+  }
+
+  // لا يزال متجاوزاً بعد المحاولات → خطأ صريح
+  return formatToolError(toolError(
+    'SCREENSHOT_TOO_LARGE',
+    `Screenshot still exceeds limits after ${MAX_CAPTURE_ATTEMPTS} attempts ` +
+    `(px=${lastDims?.width}x${lastDims?.height}, bytes=${lastBytes}). ` +
+    `Use a smaller viewport or lower quality.`
+  ));
+}
+```
+
+### 14.8 الناتج والقياسات التشخيصية
+
+يصبح ناتج `browser_screenshot` أغنى:
+
+```json
+{ "path": "...", "size": 123456, "truncated": true,
+  "width": 4000, "height": 4000, "scale": 0.632, "measured": true }
+```
+
+- `width`/`height`: الأبعاد **الحقيقية** بعد أي تصغير (مفيدة للعميل).
+- `truncated: true`: يعني «جرى تصغير لتلبية الحد» (ليس قصّاً — لا نقصّ الصورة أبداً).
+- `scale`: معامل التصغير المطبَّق.
+- `measured`: هل تمكّنّا من قراءة الأبعاد (تشخيص فقط).
+
+### 14.9 التفاعل مع بقية الميزات
+
+- **`full_page`:** نفس الحلقة تنطبق؛ الـ `clip` موجود مسبقاً فيكفي تعديل `scale`. يبقى التصغير «تصغير دقة» وليس قصّاً.
+- **`jpeg` + `quality`:** التصغير يقلّل البايتات تناسبياً تقريباً مع `scale²`. يمكن (اختيارياً) خفض `quality` كخطوة أخيرة إن تعذّر الوصول للحد بالتصغير وحده، مع توثيقه.
+- **`deviceScaleFactor` كبير:** مغطّى تلقائياً لأن الحساب الفعلي يشمل الأثر الحقيقي.
+- **`MAX_IMAGE_BYTES`:** يصبح مُطبَّقاً فعلياً لأول مرة على اللقطات.
+- **لا تستخدم `truncateBuffer` للصور:** قصّ base64 يُفسد الصورة؛ التصغير هو الوسيلة الصحيحة.
+
+### 14.10 المخاطر والاعتبارات
+
+| المخاطرة | التخفيف |
+|---|---|
+| لقطة ثانية تزيد الزمن | تحدث **فقط** عند التجاوز، وبحد أقصى محاولة تصحيح واحدة؛ الأوضاع الشائعة (desktop/explicit) لا تتجاوز. |
+| إعادة التقاط لا تصل للحد | خطأ `SCREENSHOT_TOO_LARGE` واضح بدل صورة ضخمة أو انهيار. |
+| تضخّم mobile preset (≈16MP) | سيتجاوز الحد بحدّة فيُصحَّح تلقائياً في المحاولة الثانية. |
+| فشل قراءة الأبعاد (JPEG نادراً) | `measured:false` + الاعتماد على التقدير المسبق، مع بقاء فحص البايتات فعّالاً. |
+| تكرار لا نهائي | `MAX_CAPTURE_ATTEMPTS` ثابت. |
+
+### 14.11 معايير القبول والاختبارات لهذا القسم
+
+- [ ] لقطة `mobile` preset: الأبعاد الحقيقية ≤ `MAX_SCREENSHOT_PIXELS` والبايتات ≤ `MAX_IMAGE_BYTES`، و`truncated:true`.
+- [ ] لقطة `{width:5000,height:5000}`: نفس الضمان، بلا انهيار.
+- [ ] كلاهما بصيغتي `png` و`jpeg`.
+- [ ] لقطة `full_page` لصفحة عملاقة: تُصغَّر (لا تُقصّ)، وحدودها محسوبة.
+- [ ] عند استحالة الوصول للحد → `[SCREENSHOT_TOO_LARGE]` برسالة واضحة (لا صورة فاسدة).
+- [ ] التأكد أن الأبعاد المُعادة (`width`/`height`) مساوية للأبعاد المفكوكة فعلياً من البايتات.
+- [ ] القياسات تجري من **الـ Buffer** (لا من base64) لتقليل التكلفة.

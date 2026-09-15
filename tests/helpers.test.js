@@ -58,7 +58,9 @@ describe('helpers.js — Node-side utilities', () => {
         'typeText',
         'normalizeWhitespace',
         'findTextInPage',
-        'getElementInfo'
+        'getElementInfo',
+        'isHovered',
+        'serializeValue'
       ]) {
         assert.ok(IN_PAGE[required], `missing helper: ${required}`);
       }

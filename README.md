@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-stdio%20JSON--RPC-blue)
 ![Chromium](https://img.shields.io/badge/Chromium-150.0.7871.100-4285F4?logo=googlechrome&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-aarch64%20%C2%B7%20x86__64-lightgrey)
-![Tests](https://img.shields.io/badge/tests-180%20(node%3Atest)-blue)
+![Tests](https://img.shields.io/badge/tests-258%20(node%3Atest)-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 # browser-mcp
@@ -18,7 +18,7 @@
 
 `browser-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives an AI client — Codex CLI, Claude Code, opencode, or any MCP-capable host — a real browser it can read from and interact with. It implements the protocol over stdio and controls headless Chromium directly through the Chrome DevTools Protocol (CDP) WebSocket, so there is no Puppeteer/Playwright layer to install, pin, or fight with.
 
-The server exposes nine tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, and `browser_scroll`. Together they cover the common agent loop — open a page, snapshot the interactive elements, click and type, wait for state to change, and capture the result as an image or text.
+The server exposes thirteen tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, and `browser_press`. Together they cover the common agent loop — open a page, snapshot the interactive elements, resize the viewport, click and type, hover and press keys, wait for state to change, evaluate page JavaScript, and capture the result as an image or text.
 
 It is built for resource-constrained and ARM64 environments. Chromium launches lazily on the first tool call, shuts itself down after an idle period, and cleans up its process group and temporary profile so repeated start/stop cycles leak neither memory nor browser processes. State-changing operations are serialized behind a single lock, and reading operations wait for any in-flight navigation, so concurrent tool calls cannot race the page.
 
@@ -28,14 +28,18 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ## Key Features
 
-- **Nine browser tools over MCP stdio** — navigation, text extraction, screenshots, console capture, accessibility snapshots, clicks, typing, waiting, and scrolling.
+- **Thirteen browser tools over MCP stdio** — navigation, text extraction, screenshots, console capture, accessibility snapshots, clicks, typing, waiting, scrolling, viewport resizing, JavaScript evaluation, hovering, and key presses.
 - **Raw CDP, zero browser-framework dependencies** — only `@modelcontextprotocol/sdk`, `ws`, and `zod`; no Puppeteer or Playwright.
 - **ARM64-native** — developed and verified on aarch64 (see [Tested Versions](#tested-versions)).
 - **Lazy browser start** — Chromium launches on the first tool call, not at server startup.
 - **Idle shutdown** — the browser stops after inactivity (default 5 min) while the MCP server stays alive and restarts it on demand. Idle never interrupts an in-flight tool call, and any new request extends the window.
-- **Crash recovery** — automatic WebSocket reconnect to the same process (exponential backoff) and full Chromium restart on crash (up to 2 attempts).
+- **Crash recovery** — automatic WebSocket reconnect to the same process (exponential backoff) and full Chromium restart on crash (up to 2 attempts). A `browser_resize` viewport override is re-applied automatically after a restart.
 - **Operation lock** — state-changing operations are serialized; the FIFO queue is capped at `QUEUE_LIMIT` (8) and rejects with `BUSY_QUEUE_FULL`, with a 5-minute watchdog backstop.
 - **Navigation race guard** — reading tools wait for any in-flight navigation before touching the page.
+- **Persistent viewport control** — `browser_resize` applies mobile/tablet/desktop presets or explicit sizes; the override survives navigation, idle shutdown, and a full-page screenshot (restored, never silently cleared).
+- **Measured screenshot limits** — the real PNG/JPEG dimensions are decoded from the captured buffer and the byte size checked; oversized captures are downscaled via `clip.scale` (never cropped) and re-captured once, catching `mobile: true` page-scale inflation the pre-capture estimate misses.
+- **Gated JavaScript evaluation** — `browser_evaluate` is disabled by default and refused with `EVAL_DISABLED` unless `ENABLE_EVAL_JS=1`; results are serialized in-page (cycles, DOM, functions, Map/Set, BigInt) and truncated to `MAX_EVAL_LENGTH`.
+- **Keyboard and hover control** — `browser_press` resolves named keys and characters (`src/keymap.js`) and fires default actions (form submit, focus traversal); `browser_hover` moves the real mouse and reports `matchesHover`.
 - **Reliable full-page screenshots** — scrolls the page to trigger lazy/IntersectionObserver rendering, temporarily matches the viewport to the page height, and downscales oversized pages via `clip.scale` instead of cropping them.
 - **Same-document navigation handling** — hash-only URL changes are detected and handled via `Page.navigatedWithinDocument`, so they never wait for a load event that never fires.
 - **Modal dialog auto-dismiss** — `alert`/`confirm`/`prompt` dialogs are dismissed automatically so automation never hangs.
@@ -55,7 +59,7 @@ Use it when you want browser automation available to an AI assistant without bun
                                    ▼
   ┌───────────────────────────────────────────────────────────────┐
   │  Protocol / Interface       index.js                          │
-  │  MCP server · 9 tool handlers · result + image content        │
+  │  MCP server · 13 tool handlers · result + image content       │
   └───────────────────────────────┬───────────────────────────────┘
                                   ▼
   ┌───────────────────────────────────────────────────────────────┐
@@ -80,7 +84,7 @@ Use it when you want browser automation available to an AI assistant without bun
 
 | Layer | Responsibility | Key Components |
 |-------|---------------|----------------|
-| Protocol / Interface | Speak MCP over stdio and expose the nine tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
+| Protocol / Interface | Speak MCP over stdio and expose the thirteen tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
 | Orchestration | Serialize state-changing work, track activity, coordinate navigation, shut down when idle | `OperationLock` / `withLock`, `withActivityTracking`, `resetIdleTimer`, `navigationPromise`, `ensureBrowserReady` |
 | Service / Engine | Drive Chromium, correlate CDP traffic, run in-page helpers, buffer console output, validate input | `Browser`, `CDPClient`, `helpers.js` runners + `IN_PAGE` functions, `ConsoleBuffer`, `utils.js` |
 | Infrastructure | Own the browser process, WebSocket, temp profile, screenshot files, and versioned diagnostics | Chromium child process, `DevToolsActivePort`, profile dir under `tmpdir()`, `OUTPUT_DIR`, stderr |
@@ -99,16 +103,21 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ```
 browser-mcp/
-├── index.js                  # MCP server entry point: 9 tool registrations, lock, idle timer
+├── index.js                  # MCP server entry point: 13 tool registrations, lock, idle timer
 ├── src/
 │   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, restart, cleanup
 │   ├── cdp.js                # Raw CDP WebSocket client (request/response correlation, events)
-│   ├── helpers.js            # In-page helpers (IN_PAGE) + node-side runners (click/type/wait/scroll)
+│   ├── helpers.js            # In-page helpers (IN_PAGE) + node-side runners (click/type/wait/scroll/hover/press/evaluate)
+│   ├── keymap.js             # Key resolution for browser_press (named keys + characters)
+│   ├── viewport.js           # Viewport presets + raw resize-argument validation
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
-│   └── utils.js              # URL/path validation, truncation, timeout caps, CONFIG
-├── tests/                    # 180 tests across 16 files (node:test + node:assert/strict)
-│   ├── utils.test.js         # Validation, truncation, limits
+│   └── utils.js              # URL/path validation, truncation, decodeImageSize, isEvalJsEnabled, CONFIG
+├── tests/                    # 258 tests across 22 files (node:test + node:assert/strict)
+│   ├── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
+│   ├── utils.test.js         # Validation, truncation, limits, image-size decode, eval gate
+│   ├── viewport.test.js      # viewport.js presets and raw-argument validation
+│   ├── keymap.test.js        # Key resolution and modifier bitmasks
 │   ├── cdp.test.js           # Request/response correlation, pending cleanup
 │   ├── lock.test.js          # FIFO ordering, queue limit, release-on-error
 │   ├── helpers.test.js       # In-page helper security and unit tests
@@ -121,6 +130,10 @@ browser-mcp/
 │   ├── integration.test.js   # End-to-end navigation/reading
 │   ├── reading-tools.test.js # get_text / get_console / snapshot
 │   ├── interaction.test.js   # click / type / wait_for / scroll
+│   ├── resize.test.js        # resize: explicit/presets/reset, persistence, full_page survival
+│   ├── evaluate.test.js      # evaluate: gate, primitives, DOM, cycles, promises, exceptions
+│   ├── hover-press.test.js   # hover and key press (Enter/Tab/Escape/modifiers)
+│   ├── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
 │   ├── parallel.test.js      # Concurrent instances and lock serialization
 │   ├── memory.test.js        # Truncation and memory-bound behavior
 │   └── cleanup.test.js       # Process and profile cleanup, no leaks
@@ -248,8 +261,9 @@ Priority (highest wins): **tool argument → environment variable → default �
 | `CHROMIUM_PATH` | No | auto-detect | Path to the Chromium binary. When empty, the server checks `/usr/bin/chromium-browser`, `/usr/bin/chromium`, `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`. |
 | `OUTPUT_DIR` | No | `./screenshots` | Directory where screenshots are written. Must be writable; filenames are validated so output cannot escape this directory. |
 | `ALLOW_PRIVATE_NETWORKS` | No | `false` | Allow navigation to private ranges (`10.x`, `192.168.x`, `172.x`, `*.local`, `*.internal`). `localhost`/`127.0.0.1`/`::1` are always allowed. |
+| `ENABLE_EVAL_JS` | No | `false` | Enable the `browser_evaluate` tool. **Disabled by default**; while off, the tool is refused with `EVAL_DISABLED` before any browser resource is used. Enabling it allows arbitrary page JavaScript (see [Security](#security)). |
 | `NAVIGATION_TIMEOUT_MS` | No | `30000` | Default timeout for `browser_navigate`. Range: `100`–`MAX_TIMEOUT_MS`. |
-| `TOOL_TIMEOUT_MS` | No | `10000` | Default timeout for `browser_click`, `browser_type`, `browser_get_text`. Range: `100`–`MAX_TIMEOUT_MS`. |
+| `TOOL_TIMEOUT_MS` | No | `10000` | Default timeout for `browser_click`, `browser_type`, `browser_get_text`, `browser_hover`, `browser_press`, `browser_evaluate`. Range: `100`–`MAX_TIMEOUT_MS`. |
 | `MAX_TIMEOUT_MS` | No | `120000` | Hard upper bound applied to every timeout; tool arguments cannot exceed it. |
 | `IDLE_SHUTDOWN_MS` | No | `300000` | Idle time before the browser is shut down; `0` disables idle shutdown. The MCP server stays alive either way. |
 | `MAX_TEXT_LENGTH` | No | `1000000` | Maximum characters returned by `browser_get_text` before truncation. |
@@ -257,10 +271,11 @@ Priority (highest wins): **tool argument → environment variable → default �
 | `MAX_CONSOLE_LINES` | No | `500` | Maximum lines returned by `browser_get_console`. |
 | `MAX_SNAPSHOT_ITEMS` | No | `100` | Default item count for `browser_snapshot` (hard cap `200`). |
 | `MAX_SCREENSHOT_PIXELS` | No | `16000000` | Maximum screenshot area before auto-downscaling (16M ≈ 4000×4000). |
-| `MAX_IMAGE_BYTES` | No | `10000000` | Maximum image payload bytes accepted in a response. |
+| `MAX_IMAGE_BYTES` | No | `10000000` | Maximum image payload bytes accepted in a response. Also enforced on screenshots by post-capture measurement. |
+| `MAX_EVAL_LENGTH` | No | `100000` | Maximum characters for a `browser_evaluate` expression and for its JSON-stringified result before truncation. |
 | `QUEUE_LIMIT` | No | `8` | Maximum queued state-changing operations before `BUSY_QUEUE_FULL`. Range: `1`–`64`. |
 
-**Reserved (accepted but not yet implemented):** `ENABLE_EVAL_JS` (there is no tool that executes arbitrary JavaScript), `MAX_REDIRECTS` (Chromium follows redirects natively), and `LOG_LEVEL` (all logging currently goes to stderr at a single verbosity). They are documented so configuration written against `.env.example` stays valid.
+**Reserved (accepted but not yet implemented):** `MAX_REDIRECTS` (Chromium follows redirects natively) and `LOG_LEVEL` (all logging currently goes to stderr at a single verbosity). They are documented so configuration written against `.env.example` stays valid.
 
 ---
 
@@ -281,6 +296,10 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 | `browser_type` | state-changing | ✅ | Type into input/textarea/contenteditable |
 | `browser_wait_for` | reading | — | Wait for an element and/or text |
 | `browser_scroll` | reading | — | Scroll by direction, element, or coordinates |
+| `browser_resize` | state-changing | ✅ | Resize the viewport (preset, explicit size, or reset) |
+| `browser_evaluate` | state-changing | ✅ | Evaluate page JavaScript (gated by `ENABLE_EVAL_JS`) |
+| `browser_hover` | state-changing | ✅ | Move the mouse over an element |
+| `browser_press` | state-changing | ✅ | Press a key, optionally focusing an element |
 
 > Reading tools still wait for any in-flight navigation before touching the page, and every tool call resets the idle timer.
 
@@ -309,10 +328,11 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ### browser_screenshot
 
 - **Params**: `filename` (optional, auto-generated), `format` (`jpeg`|`png`, default `jpeg`), `quality` (1–100, default 80), `full_page` (boolean, default false), `delay_ms` (0–5000, default 0)
-- **Returns**: `{ path, size, truncated }` plus inline base64 image content
-- **Errors**: `UNSAFE_PATH` (absolute paths or `..` rejected)
-- **Full-page details**: scrolls through the page first so lazy/IntersectionObserver sections paint, re-reads layout metrics, temporarily overrides the viewport to the full page height (always reset, even on failure), and downscales pages over 16M pixels via `clip.scale` — the full page is captured at lower resolution, never cropped
-- **Viewport details**: no `clip` is passed to `Page.captureScreenshot`; a clip with `captureBeyondViewport: false` produces a blank frame on scrolled pages
+- **Returns**: `{ path, size, truncated, width, height, scale, measured }` plus inline base64 image content — `width`/`height` are the real measured dimensions, `truncated` means it was downscaled (never cropped), and `measured` reports whether the dimensions were decoded
+- **Errors**: `UNSAFE_PATH` (absolute paths or `..` rejected), `SCREENSHOT_TOO_LARGE`
+- **Limit handling**: a best-effort pre-capture estimate using `deviceScaleFactor`/page scale sets an initial scale; after each capture the real PNG/JPEG header is decoded from the buffer (`decodeImageSize`) and the byte size checked. If either exceeds `MAX_SCREENSHOT_PIXELS`/`MAX_IMAGE_BYTES`, the capture is downscaled via `clip.scale` and retried once (this catches `mobile: true` page-scale inflation the estimate misses)
+- **Full-page details**: scrolls through the page first so lazy/IntersectionObserver sections paint, re-reads layout metrics, temporarily overrides the viewport to the full page height, and restores the previous viewport in a `finally` block (a prior `browser_resize` is preserved, not cleared) — the full page is captured at lower resolution, never cropped
+- **Viewport details**: normally no `clip` is passed to `Page.captureScreenshot`; a clip with `captureBeyondViewport: false` produces a blank frame on scrolled pages. A clip is only added when downscaling is required, together with `captureBeyondViewport: true`
 - **Locked** only when `full_page: true`; viewport shots are read-only
 - **Output**: written to `OUTPUT_DIR` and returned inline
 
@@ -364,6 +384,56 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 - **Errors**: `INVALID_ARGS` (no mode, conflicting modes, or `x` without `y`), `ELEMENT_NOT_FOUND` (selector mode)
 - **Locked**: no (viewport state, not DOM state)
 
+### browser_resize
+
+- **Params** (exactly one mode required): `preset` (`mobile`|`tablet`|`desktop`), `width`+`height` (100–10000), or `reset: true`; optional `device_scale_factor` (1–4) and `mobile` overrides; optional `timeout_ms`
+- **Returns**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset }`
+- **Presets**: mobile `390×844 @3 mobile`, tablet `768×1024 @2 mobile`, desktop `1280×800 @1`
+- **Behavior**: validation runs on the raw arguments (not Zod-normalized), so `reset` and an empty call are distinguishable. The override is stored on the browser object, survives navigation and idle shutdown, is re-applied after a crash restart, and is **restored** (not cleared) after a `full_page` screenshot. Settles with a double-rAF after applying
+- **Errors**: `INVALID_ARGS` (no mode, conflicting modes, width without height, reset combined with other options), `VIEWPORT_APPLY_FAILED`
+- **Locked**
+
+```json
+{ "name": "browser_resize", "arguments": { "preset": "mobile" } }
+{ "name": "browser_resize", "arguments": { "width": 500, "height": 700, "device_scale_factor": 2 } }
+{ "name": "browser_resize", "arguments": { "reset": true } }
+```
+
+### browser_evaluate
+
+- **Params**: `expression` (string, required, ≤ `MAX_EVAL_LENGTH`), `await_promise` (default `true`), `user_gesture` (default `false`), `timeout_ms` (default 10000)
+- **Returns**: `{ result, type, truncated }`
+- **Behavior**: **disabled by default** — refused with `EVAL_DISABLED` before the browser starts unless `ENABLE_EVAL_JS=1`. Primitives are returned directly; objects, arrays, functions, and DOM nodes are serialized in-page by a fixed helper (cycles marked, depth 4, 100 properties, `Date`/`Error`/`Element`/`Map`/`Set`/`BigInt`/`Symbol` readable). The result is JSON-stringified and truncated to `MAX_EVAL_LENGTH`. The remote object handle is always released
+- **Errors**: `EVAL_DISABLED` (gate off), `EVAL_ERROR` (in-page exception, with description), `TIMEOUT`
+- **Locked**
+
+```json
+{ "name": "browser_evaluate", "arguments": { "expression": "document.querySelectorAll('a').length" } }
+{ "name": "browser_evaluate", "arguments": { "expression": "fetch('/api').then(r => r.status)", "await_promise": true } }
+```
+
+### browser_hover
+
+- **Params**: `selector` (required), `timeout_ms` (default 10000)
+- **Returns**: `{ hovered: true, selector, x, y, matchesHover }`
+- **Behavior**: waits for the element, checks visibility, scrolls it into view (`instant` + settle), resolves an unobstructed point (center + quadrants), and moves the real mouse there. If `:hover` does not engage, a nudge (away then back) is attempted. `matchesHover` is diagnostic — some elements have no `:hover` style
+- **Errors**: `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Locked**
+
+### browser_press
+
+- **Params**: `key` (required), `modifiers` (`Alt`|`Control`|`Meta`|`Shift`[], default `[]`), `selector` (optional — focused first), `repeat` (1–100, default 1), `timeout_ms` (default 10000)
+- **Returns**: `{ pressed: true, key, modifiers, count, selector, focused }`
+- **Behavior**: keys are resolved by `src/keymap.js` — named keys (`Enter`, `Tab`, `Escape`, arrows, `F1`–`F12`, …) or a single character. Enter/Tab/Space carry text so default actions fire (form submit, focus traversal). Sends `keyDown`/`rawKeyDown` then `keyUp`, and settles before returning
+- **Errors**: `KEY_NOT_SUPPORTED` (unknown key), `INVALID_ARGS`, `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Locked**
+- **Security**: a single-character key is never logged (recorded as `<char>`)
+
+```json
+{ "name": "browser_press", "arguments": { "key": "Enter", "selector": "#form-input" } }
+{ "name": "browser_press", "arguments": { "key": "a", "modifiers": ["Control"] } }
+```
+
 ### Error codes
 
 | Code | Meaning |
@@ -375,6 +445,11 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 | `ELEMENT_HIDDEN` | Element exists but is hidden or zero-sized |
 | `ELEMENT_NOT_CLICKABLE` | Element is covered by an overlay and `force` was not set |
 | `ELEMENT_NOT_TYPEABLE` | Element is not an input, textarea, or contenteditable |
+| `KEY_NOT_SUPPORTED` | `browser_press` key is not a known named key or single character |
+| `EVAL_DISABLED` | `browser_evaluate` called while `ENABLE_EVAL_JS` is off |
+| `EVAL_ERROR` | JavaScript threw inside the page (message includes the exception) |
+| `VIEWPORT_APPLY_FAILED` | CDP failed to apply the `browser_resize` override |
+| `SCREENSHOT_TOO_LARGE` | Capture still exceeded pixel/byte limits after the one re-scale attempt |
 | `TIMEOUT` | Operation exceeded its timeout |
 | `BUSY_QUEUE_FULL` | Operation queue is at capacity (`QUEUE_LIMIT`); retry later |
 | `BROWSER_NOT_READY` | A CDP command was attempted while the browser was not ready |
@@ -388,11 +463,11 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 
 - **URL policy**: only `http:`, `https:`, and `about:` are permitted. `file:`, `javascript:`, `data:`, and `vbscript:` are rejected. Private IP ranges are blocked by default (`ALLOW_PRIVATE_NETWORKS=1` to allow), while `localhost`/`127.0.0.1`/`::1` are always permitted.
 - **Safe output paths**: screenshot filenames cannot be absolute or contain `..`, and resolved paths must stay inside `OUTPUT_DIR`.
-- **No arbitrary code execution**: there is no eval-JS tool. (`ENABLE_EVAL_JS` is reserved and unimplemented.)
+- **Gated JavaScript execution**: `browser_evaluate` is **disabled by default** and refused with `EVAL_DISABLED` before any browser resource is used. When enabled (`ENABLE_EVAL_JS=1`) the page code can read `document.cookie`/`localStorage` and issue `fetch()` requests to internal networks (**SSRF**) that bypass the navigation-only `validateURL` check — only enable it on trusted pages. No other tool executes user-supplied JavaScript.
 - **CSS selectors only**: interaction tools accept CSS selectors, never JavaScript.
-- **Injection-proof arguments**: selectors and typed text travel as CDP `arguments` values and are never concatenated into JavaScript source — `'); maliciousCode(); ('` is treated as literal data.
-- **Sensitive data**: `browser_type` never logs the typed text.
-- **Resource limits**: text, console, screenshot, and snapshot outputs are capped, and timeouts are bounded by `MAX_TIMEOUT_MS`.
+- **Injection-proof arguments**: selectors and typed text travel as CDP `arguments` values and are never concatenated into JavaScript source — `'); maliciousCode(); ('` is treated as literal data. The `browser_evaluate` expression is the deliberate exception, and it is gated.
+- **Sensitive data**: `browser_type` never logs the typed text; `browser_press` logs a single-character key as `<char>`.
+- **Resource limits**: text, console, screenshot, snapshot, and eval outputs are capped; timeouts are bounded by `MAX_TIMEOUT_MS`; screenshot pixel/byte limits are verified against the real captured image.
 - **Never commit secrets**: no credentials are required, but keep `.env` files and local configuration out of version control.
 
 ---
@@ -400,23 +475,26 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ## Testing and Quality
 
 ```bash
-# Run the full suite (180 tests across 16 files)
+# Run the full suite (258 tests across 22 files)
 npm test
 
 # Run a single test file
 node --test tests/interaction.test.js
+
+# Low-RAM devices: run one file at a time with bounded concurrency
+node --test --test-concurrency=1 tests/resize.test.js
 ```
 
-`npm test` runs `node --test --test-concurrency=3 tests/*.test.js`. Tests use the built-in `node:test` runner with `node:assert/strict` — no external test framework.
+`npm test` runs `node --test --test-concurrency=3 tests/*.test.js`. Tests use the built-in `node:test` runner with `node:assert/strict` — no external test framework. Shared integration helpers live in `tests/harness.js` (fixture server, MCP child process, buffered JSON-RPC).
 
 Coverage spans:
 
-- **Unit**: URL/path validation, truncation and limits, CDP request/response correlation, operation-lock behavior, in-page helper security
+- **Unit**: URL/path validation, truncation and limits, viewport argument resolution, key resolution/modifier bitmasks, image-size decoding, eval gate, CDP request/response correlation, operation-lock behavior, in-page helper security
 - **Browser lifecycle**: launch, crash + restart, WebSocket reconnect, lazy start, idle shutdown, cleanup with no leaked processes
-- **Tool integration**: reading tools, interaction tools (click/type/wait_for/scroll), parallel instances and lock serialization
+- **Tool integration**: reading tools, interaction tools (click/type/wait_for/scroll), resize (presets, persistence, full-page survival), evaluate (gate, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot limit enforcement, parallel instances and lock serialization
 - **Security**: injection resistance and absence of sensitive logging
 
-Integration tests spawn real Chromium, so they require Chromium to be installed (see [Install Chromium](#install-chromium)). `--test-concurrency=3` keeps concurrent Chromium instances bounded on low-RAM devices (5.5 GB in testing); raise it on beefier hardware.
+Integration tests spawn real Chromium, so they require Chromium to be installed (see [Install Chromium](#install-chromium)). `--test-concurrency=3` keeps concurrent Chromium instances bounded on low-RAM devices (5.5 GB in testing); raise it on beefier hardware. On very small devices, `memory.test.js` (50 start/stop cycles) is the heaviest file — run it alone and last.
 
 A stress test for start/stop cycles (checking for leaked Chromium processes and RSS growth) is also included:
 

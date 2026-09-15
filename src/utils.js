@@ -24,6 +24,7 @@ const MAX_CONSOLE_LINES = envInt('MAX_CONSOLE_LINES', 500);
 const MAX_CONSOLE_MESSAGES = envInt('MAX_CONSOLE_MESSAGES', 500);
 const MAX_SNAPSHOT_ITEMS = envInt('MAX_SNAPSHOT_ITEMS', 100);
 const MAX_SCREENSHOT_PIXELS = envInt('MAX_SCREENSHOT_PIXELS', 16_000_000);
+const MAX_EVAL_LENGTH = envInt('MAX_EVAL_LENGTH', 100_000);
 
 const QUEUE_LIMIT = envInt('QUEUE_LIMIT', 8);
 
@@ -164,6 +165,69 @@ export function formatMCPError(code, message, details = null) {
   return { isError: true, error };
 }
 
+/**
+ * Whether `browser_evaluate` is enabled. Disabled by default: the project
+ * does not execute arbitrary page JavaScript unless explicitly opted in.
+ * Accepts 1 / true / yes (case-insensitive).
+ */
+export function isEvalJsEnabled() {
+  const raw = (process.env.ENABLE_EVAL_JS || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+/**
+ * Read the real pixel dimensions of an encoded PNG or JPEG image buffer,
+ * without any external dependency. Returns null when the format is unknown
+ * or the header cannot be parsed (callers fall back to their estimate).
+ */
+export function decodeImageSize(buffer, format) {
+  try {
+    if (!Buffer.isBuffer(buffer)) return null;
+
+    if (format === 'png') {
+      // PNG signature (8 bytes) + IHDR length/type (8) => width at 16, height at 20.
+      if (buffer.length < 24 || buffer.readUInt32BE(0) !== 0x89504e47) return null;
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      if (!width || !height) return null;
+      return { width, height };
+    }
+
+    if (format === 'jpeg' || format === 'jpg') {
+      let offset = 2; // skip SOI (0xFFD8)
+      while (offset + 9 < buffer.length) {
+        if (buffer[offset] !== 0xff) {
+          offset++;
+          continue;
+        }
+        const marker = buffer[offset + 1];
+        // Standalone markers carry no length payload.
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          offset += 2;
+          continue;
+        }
+        const length = buffer.readUInt16BE(offset + 2);
+        const isSOF =
+          marker >= 0xc0 && marker <= 0xcf &&
+          marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+        if (isSOF) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          if (!width || !height) return null;
+          return { width, height };
+        }
+        offset += 2 + length;
+      }
+      return null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+
 export function formatMCPResult(data) {
   return { isError: false, data };
 }
@@ -171,6 +235,7 @@ export function formatMCPResult(data) {
 export const ERRORS = {
   INVALID_URL: 'INVALID_URL',
   UNSAFE_PATH: 'UNSAFE_PATH',
+  INVALID_ARGS: 'INVALID_ARGS',
   TIMEOUT: 'TIMEOUT',
   BROWSER_NOT_READY: 'BROWSER_NOT_READY',
   BROWSER_CRASHED: 'BROWSER_CRASHED',
@@ -178,7 +243,15 @@ export const ERRORS = {
   BUSY_QUEUE_FULL: 'BUSY_QUEUE_FULL',
   CHROMIUM_RESTART_FAILED: 'CHROMIUM_RESTART_FAILED',
   NAVIGATION_FAILED: 'NAVIGATION_FAILED',
-  ELEMENT_NOT_FOUND: 'ELEMENT_NOT_FOUND'
+  ELEMENT_NOT_FOUND: 'ELEMENT_NOT_FOUND',
+  ELEMENT_HIDDEN: 'ELEMENT_HIDDEN',
+  ELEMENT_NOT_CLICKABLE: 'ELEMENT_NOT_CLICKABLE',
+  ELEMENT_NOT_TYPEABLE: 'ELEMENT_NOT_TYPEABLE',
+  KEY_NOT_SUPPORTED: 'KEY_NOT_SUPPORTED',
+  EVAL_DISABLED: 'EVAL_DISABLED',
+  EVAL_ERROR: 'EVAL_ERROR',
+  VIEWPORT_APPLY_FAILED: 'VIEWPORT_APPLY_FAILED',
+  SCREENSHOT_TOO_LARGE: 'SCREENSHOT_TOO_LARGE'
 };
 
 export const CONFIG = {
@@ -192,5 +265,6 @@ export const CONFIG = {
   MAX_CONSOLE_MESSAGES,
   MAX_SNAPSHOT_ITEMS,
   MAX_SCREENSHOT_PIXELS,
+  MAX_EVAL_LENGTH,
   QUEUE_LIMIT
 };

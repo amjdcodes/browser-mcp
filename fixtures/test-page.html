@@ -66,6 +66,16 @@
             padding: 15px;
             border-radius: 5px;
         }
+        #hover-target {
+            width: 220px;
+            padding: 12px;
+            background: #eee;
+            border: 1px solid #ccc;
+            cursor: pointer;
+        }
+        #hover-target:hover {
+            background: #ffe08a;
+        }
     </style>
 </head>
 <body>
@@ -189,6 +199,13 @@
     <div class="section">
         <h2>Console Output</h2>
         <p>Open browser console to see messages. Click buttons above to trigger console output.</p>
+    </div>
+
+    <div class="section" id="hover-keyboard-section">
+        <h2>Hover &amp; Keyboard Testing</h2>
+        <div id="hover-target">Hover over me</div>
+        <p id="hover-result" class="echo">not hovered</p>
+        <p id="key-result" class="echo">no key</p>
     </div>
 
     <script>
@@ -321,6 +338,27 @@
         setTimeout(() => {
             console.warn('Delayed warning after 2 seconds');
         }, 2000);
+
+        // --- Hover testing ---
+        const hoverTarget = document.getElementById('hover-target');
+        if (hoverTarget) {
+            hoverTarget.addEventListener('mouseenter', function() {
+                document.getElementById('hover-result').textContent = 'hovered';
+            });
+            hoverTarget.addEventListener('mouseleave', function() {
+                document.getElementById('hover-result').textContent = 'not hovered';
+            });
+        }
+
+        // --- Keyboard testing ---
+        document.addEventListener('keydown', function(e) {
+            const keyResult = document.getElementById('key-result');
+            if (keyResult) {
+                keyResult.textContent = 'key=' + e.key +
+                    ' ctrl=' + e.ctrlKey + ' shift=' + e.shiftKey +
+                    ' alt=' + e.altKey + ' meta=' + e.metaKey;
+            }
+        });
     </script>
 </body>
 </html>

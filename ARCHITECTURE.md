@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 8 tools for AI assistants to control a browser instance.
+**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 13 tools for AI assistants to control a browser instance.
 
 - **Runtime**: Node.js (ESM modules, `"type": "module"`)
 - **Protocol**: MCP over stdio transport
@@ -17,12 +17,14 @@
 browser-mcp/
 ├── index.js                    # MCP server entry point, tool definitions
 ├── src/                        # Core implementation
-│   ├── browser.js              # Chromium lifecycle management
+│   ├── browser.js              # Chromium lifecycle + persistent viewport state
 │   ├── cdp.js                  # Raw CDP WebSocket client
 │   ├── console-buffer.js       # In-memory console message buffer
 │   ├── helpers.js              # In-page interaction helpers (callFunctionOn)
+│   ├── keymap.js               # Key resolution for browser_press
 │   ├── lock.js                 # Operation lock (mutex + bounded queue)
-│   └── utils.js                # Validation, truncation, error formatting
+│   ├── utils.js                # Validation, truncation, error formatting, image size decode
+│   └── viewport.js             # Viewport presets + raw resize validation
 ├── tests/                      # Unit and integration tests (node:test)
 │   ├── browser.test.js         # Browser class tests
 │   ├── cdp.test.js             # CDP client tests
@@ -50,7 +52,7 @@ browser-mcp/
 
 **Responsibilities**:
 - Creates MCP server instance with stdio transport
-- Registers 9 tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`
+- Registers 13 tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`
 - Manages browser lifecycle (lazy initialization on first tool call)
 - Implements idle timeout shutdown (default 5 minutes)
 - Serializes state-changing operations (click/type/navigate/full-page screenshot) via `src/lock.js`
@@ -389,6 +391,8 @@ MCP Response (JSON-RPC)
 | `MAX_CONSOLE_MESSAGES` | `500` | Console ring buffer size |
 | `MAX_SNAPSHOT_ITEMS` | `100` | Snapshot default limit |
 | `MAX_SCREENSHOT_PIXELS` | `16000000` | Screenshot area cap |
+| `MAX_EVAL_LENGTH` | `100000` | browser_evaluate expression/result length cap |
+| `ENABLE_EVAL_JS` | `0` | Enable the browser_evaluate tool (disabled by default) |
 | `QUEUE_LIMIT` | `8` | Operation lock queue size |
 
 See `.env.example` for the full documented list (including reserved variables). Priority: tool argument → env var → default → hard limit.
@@ -462,13 +466,47 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `INVALID_ARGS` (no mode, conflicting modes, or x without y), `ELEMENT_NOT_FOUND` (selector mode)
 - **Locked**: no (viewport read/write, not DOM state)
 
+### 10. `browser_resize`
+- **Input**: `preset` (`mobile`|`tablet`|`desktop`, optional), `width`/`height` (100–10000, optional), `device_scale_factor` (1–4, optional), `mobile` (boolean, optional), `reset` (boolean, optional), `timeout_ms` (optional)
+- **Output**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset }`
+- **CDP Commands**: `Emulation.setDeviceMetricsOverride` / `Emulation.clearDeviceMetricsOverride`
+- **Behavior**: three exclusive modes — `reset`, a named `preset`, or explicit `width`+`height`. Validation runs on the RAW arguments in `src/viewport.js` (`resolveViewportParams`), never on a Zod-normalized object — Zod `.default()` values would otherwise make `reset` impossible to distinguish from a default and hide an empty `{}` call. The applied viewport is stored on `Browser.viewport` (survives idle shutdown and is re-applied after a restart/reconnect) and a double-rAF settle follows. Presets: mobile `390×844 @3 mobile`, tablet `768×1024 @2 mobile`, desktop `1280×800 @1`.
+- **Errors**: `INVALID_ARGS`, `VIEWPORT_APPLY_FAILED`
+- **Locked**: yes
+
+### 11. `browser_evaluate`
+- **Input**: `expression` (string, required, ≤ `MAX_EVAL_LENGTH`), `await_promise` (default true), `user_gesture` (default false), `timeout_ms` (default 10000)
+- **Output**: `{ result, type, truncated }`
+- **CDP Commands**: `Runtime.evaluate`, `Runtime.callFunctionOn` (`IN_PAGE.serializeValue`), `Runtime.releaseObject`
+- **Behavior**: **disabled by default** — refused with `EVAL_DISABLED` before the browser starts unless `ENABLE_EVAL_JS=1`. Primitives are returned directly; object/function/DOM results are serialized in-page by the static `IN_PAGE.serializeValue` helper (cycles, depth `4`, `100` properties, Date/Error/Element/Map/Set/BigInt/Symbol), and the remote handle is always released. The serialized result is JSON-stringified and truncated to `MAX_EVAL_LENGTH`.
+- **Errors**: `EVAL_DISABLED`, `EVAL_ERROR` (in-page exception), `TIMEOUT`
+- **Locked**: yes (arbitrary JS can mutate the DOM)
+- **Security**: when enabled the page code can read cookies/localStorage and issue `fetch()` to internal networks (SSRF), bypassing the navigation-only `validateURL` check — see the Security Model
+
+### 12. `browser_hover`
+- **Input**: `selector` (string, required), `timeout_ms` (optional, default 10000)
+- **Output**: `{ hovered: true, selector, x, y, matchesHover }`
+- **CDP Commands**: `Runtime.callFunctionOn` (`isElementVisible`, `scrollIntoView`, `getClickablePoint`, `isHovered`), `Input.dispatchMouseEvent` (`mouseMoved`)
+- **Behavior**: waits for element → visibility → scroll into view (`instant` + settle) → resolve an unobstructed point (center + quadrants) → move the real mouse. If `:hover` does not engage on the first move, a nudge (away, then back) is attempted. `matchesHover` reports the final `matches(':hover')` state — diagnostic, not an error.
+- **Errors**: `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Locked**: yes (hover can open menus)
+
+### 13. `browser_press`
+- **Input**: `key` (string, required), `modifiers` (`Alt`|`Control`|`Meta`|`Shift`[], default `[]`), `selector` (optional — focused first), `repeat` (1–100, default 1), `timeout_ms` (optional, default 10000)
+- **Output**: `{ pressed: true, key, modifiers, count, selector, focused }`
+- **CDP Commands**: `Input.dispatchKeyEvent` (`keyDown` with text for printable keys, `rawKeyDown` otherwise, then `keyUp`)
+- **Behavior**: resolves the key via `src/keymap.js` (`resolveKey`, throws `KEY_NOT_SUPPORTED` for unknown keys); with a selector it scrolls/focuses the element first. Enter/Tab/Space carry text so keypress/default actions fire (form submit, focus traversal). Always sends `keyUp`, then settles before returning.
+- **Errors**: `KEY_NOT_SUPPORTED`, `INVALID_ARGS`, `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Locked**: yes
+- **Security**: a single-character key is logged as `<char>`, never its value
+
 ---
 
 ## Testing Strategy
 
 - **Unit tests**: `node --test tests/*.test.js`
-- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js` (spawn real Chromium)
-- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`
+- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js` (spawn real Chromium)
+- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`; shared integration harness in `tests/harness.js`
 
 **Test Coverage**:
 - URL validation (scheme, private IP, edge cases)
@@ -477,7 +515,11 @@ See `.env.example` for the full documented list (including reserved variables). 
 - Browser lifecycle (start, crash, restart, cleanup)
 - Console buffer (add, clear, truncate, filter)
 - MCP tool functionality
-- Interaction tools (click/type/wait_for) incl. Arabic text, scrolling, lock serialization
+- Interaction tools (click/type/wait_for/scroll) incl. Arabic text and lock serialization
+- Resize (explicit/preset/reset, persistence across navigation, survival of full_page capture)
+- Evaluate (gate disabled, primitives/objects/DOM/cycles/promises/exceptions, truncation)
+- Hover and key press (Enter form submit, Tab focus, Escape, modifiers, unsupported keys)
+- Screenshot limits (post-capture downscaling, mobile page scale, tall pages)
 - Operation lock (FIFO, queue limit, release on error/timeout)
 - Security (selector/text injection resistance, no sensitive logging)
 
@@ -502,7 +544,8 @@ See `.env.example` for the full documented list (including reserved variables). 
 2. **Path Traversal**: Prevents `..` and absolute paths in screenshot filenames
 3. **Output Isolation**: Screenshots confined to `OUTPUT_DIR`
 4. **Resource Limits**: Timeouts, text truncation, pixel limits
-5. **No Remote Code Execution**: All CDP commands are internal, no user-supplied JS execution
+5. **Gated JS execution**: no arbitrary-JS tool runs by default — `browser_evaluate` is refused (`EVAL_DISABLED`) unless `ENABLE_EVAL_JS=1`. When enabled it can read cookies/localStorage and reach internal networks via in-page `fetch()` (SSRF), bypassing the navigation-only `validateURL` check. No other tool executes user-supplied JavaScript.
+6. **Measured screenshot limits**: after each capture the real image dimensions are decoded from the buffer and the byte size checked; oversized captures are downscaled via `clip.scale` (never cropped) and re-captured once, or fail with `SCREENSHOT_TOO_LARGE`.
 
 ---
 

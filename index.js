@@ -4,7 +4,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Browser } from './src/browser.js';
-import { validateURL, capTimeout, truncateText, validateSafePath, ERRORS, CONFIG } from './src/utils.js';
+import {
+  validateURL,
+  capTimeout,
+  truncateText,
+  validateSafePath,
+  isEvalJsEnabled,
+  decodeImageSize,
+  ERRORS,
+  CONFIG
+} from './src/utils.js';
 import { OperationLock, withLock } from './src/lock.js';
 import {
   clickElement,
@@ -14,8 +23,13 @@ import {
   scrollByDirection,
   scrollToPosition,
   scrollToElement,
-  waitForSettle
+  waitForSettle,
+  hoverElement,
+  pressKey,
+  evaluateExpression
 } from './src/helpers.js';
+import { resolveViewportParams } from './src/viewport.js';
+import { resolveKey } from './src/keymap.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -542,12 +556,8 @@ registerTool(
 
         let metrics = await browser.send('Page.getLayoutMetrics', {}, 5000);
 
-        let clip;
-        let captureBeyondViewport = false;
-        // Dimensions used for the pixel-limit check (full-page: the clip;
-        // viewport: the visual viewport — no clip is passed for viewport shots).
-        let captureSize = null;
-
+        // Full-page captures need an explicit clip spanning the whole document.
+        let fullPageClip = null;
         if (full_page) {
           // Trigger lazy rendering (IntersectionObserver) for below-fold sections
           // before capturing — otherwise middle sections come out blank.
@@ -556,60 +566,71 @@ registerTool(
           // Re-read metrics: contentSize may have grown after the warm-up.
           metrics = await browser.send('Page.getLayoutMetrics', {}, 5000);
           const contentSize = metrics.contentSize || metrics.cssContentSize;
-          clip = {
+          fullPageClip = {
             x: 0,
             y: 0,
             width: contentSize.width,
             height: contentSize.height,
             scale: 1
           };
-          captureBeyondViewport = true;
-        } else {
-          // Viewport capture: do NOT pass a clip. An explicit clip with
-          // captureBeyondViewport:false captures a BLANK (white/black) frame
-          // when the page is scrolled — clip coordinates are page-space, and
-          // Chromium never produces the clipped surface for the scrolled page.
-          // Without a clip, the current viewport at the current scroll
-          // position is captured correctly.
-          const visualViewport = metrics.visualViewport || metrics.layoutViewport;
-          captureSize = {
-            width: visualViewport.clientWidth,
-            height: visualViewport.clientHeight
-          };
         }
 
-        const totalPixels = (clip ?? captureSize).width * (clip ?? captureSize).height;
+        // The CSS visual viewport carries the page-scale factor applied by
+        // mobile emulation; the stored deviceScaleFactor is the other factor
+        // that multiplies the real pixel size of a capture.
+        const visualViewport =
+          metrics.cssVisualViewport || metrics.visualViewport || metrics.layoutViewport;
+        const deviceScaleFactor =
+          (browser.viewport && browser.viewport.deviceScaleFactor) || 1;
+        const pageScale =
+          visualViewport.scale && visualViewport.scale > 0 ? visualViewport.scale : 1;
+        // Full-page captures force deviceScaleFactor 1 and mobile false, so only
+        // the clip's own scale affects their size.
+        const scaleProduct = fullPageClip ? 1 : deviceScaleFactor * pageScale;
+
+        // --- Layer 1: best-effort pre-capture estimate ----------------------
+        // Avoids a second capture in the common case. The post-capture
+        // measurement below is the authority.
+        let scale = 1;
         let truncated = false;
-
-        if (totalPixels > MAX_SCREENSHOT_PIXELS) {
-          // FIX: reduce RESOLUTION via clip.scale, keeping clip.width/height at the
-          // full capture dimensions. Shrinking the clip would CROP the page
-          // (right/bottom edges lost) instead of downscaling it.
-          const scaleFactor = Math.sqrt(MAX_SCREENSHOT_PIXELS / totalPixels);
-          clip.scale = scaleFactor;
-          truncated = true;
-          const outputPixels =
-            Math.round(clip.width * scaleFactor) * Math.round(clip.height * scaleFactor);
-          process.stderr.write(
-            `[MCP] Screenshot scaled from ${totalPixels} to ~${outputPixels} pixels (scale=${scaleFactor.toFixed(3)})\n`
-          );
+        {
+          const baseW = fullPageClip ? fullPageClip.width : visualViewport.clientWidth;
+          const baseH = fullPageClip ? fullPageClip.height : visualViewport.clientHeight;
+          const estPixels = baseW * baseH * scaleProduct * scaleProduct;
+          if (estPixels > MAX_SCREENSHOT_PIXELS) {
+            // Reduce RESOLUTION via clip.scale; shrinking the clip would CROP
+            // the page instead of downscaling it.
+            scale = Math.sqrt(MAX_SCREENSHOT_PIXELS / estPixels) * 0.98;
+            if (fullPageClip) fullPageClip.scale = scale;
+            truncated = true;
+            process.stderr.write(
+              `[MCP] Screenshot pre-scaled (estimate ~${Math.round(estPixels)}px, scale=${scale.toFixed(3)})\n`
+            );
+          }
         }
 
-        const screenshotParams = {
-          format
+        const buildCaptureParams = (captureScale) => {
+          const params = { format };
+          if (fullPageClip) {
+            params.clip = { ...fullPageClip, scale: captureScale };
+            params.captureBeyondViewport = true;
+          } else if (captureScale !== 1) {
+            // Viewport captures normally pass NO clip (an explicit clip with
+            // captureBeyondViewport:false yields a blank frame on a scrolled
+            // page). When downscaling is required we must supply a clip at the
+            // current page offset, with captureBeyondViewport:true.
+            params.clip = {
+              x: visualViewport.pageX || 0,
+              y: visualViewport.pageY || 0,
+              width: visualViewport.clientWidth,
+              height: visualViewport.clientHeight,
+              scale: captureScale
+            };
+            params.captureBeyondViewport = true;
+          }
+          if (format === 'jpeg') params.quality = quality;
+          return params;
         };
-
-        // Full-page captures pass an explicit clip (page coordinates, with
-        // captureBeyondViewport so the whole document is captured). Viewport
-        // captures pass no clip — see the viewport branch above.
-        if (clip) {
-          screenshotParams.clip = clip;
-          screenshotParams.captureBeyondViewport = captureBeyondViewport;
-        }
-
-        if (format === 'jpeg') {
-          screenshotParams.quality = quality;
-        }
 
         // Optional explicit delay for pages with heavy animations or
         // lazy-loaded content (the post-click settle covers the common case).
@@ -620,14 +641,15 @@ registerTool(
 
         // For full-page captures, temporarily set the viewport height to the full
         // page height so CSS layout computations (grid/flex/100vh) resolve
-        // correctly. ALWAYS reset afterwards, even on failure.
+        // correctly. ALWAYS restore the previous state afterwards, even on
+        // failure — never leave a browser_resize override cleared.
+        const previousViewport = browser.viewport;
         let emulationSet = false;
         try {
           if (full_page) {
-            const viewport = metrics.visualViewport || metrics.layoutViewport;
             await browser.send('Emulation.setDeviceMetricsOverride', {
-              width: viewport.clientWidth,
-              height: Math.max(clip.height, viewport.clientHeight),
+              width: visualViewport.clientWidth,
+              height: Math.max(fullPageClip.height, visualViewport.clientHeight),
               deviceScaleFactor: 1,
               mobile: false
             }, 5000);
@@ -635,34 +657,97 @@ registerTool(
             await new Promise(resolve => setTimeout(resolve, 200));
           }
 
-          const result = await browser.send('Page.captureScreenshot', screenshotParams, 30000);
+          // --- Layer 2: capture, measure the real image, correct if needed --
+          const MAX_CAPTURE_ATTEMPTS = 2;
+          let finalResult = null;
+          let finalBuffer = null;
+          let finalDims = null;
+          let finalScale = scale;
+          let lastBuffer = null;
+          let lastDims = null;
 
-          const buffer = Buffer.from(result.data, 'base64');
+          for (let attempt = 0; attempt < MAX_CAPTURE_ATTEMPTS; attempt++) {
+            const result = await browser.send(
+              'Page.captureScreenshot',
+              buildCaptureParams(scale),
+              30000
+            );
+            const buffer = Buffer.from(result.data, 'base64');
+            const dims = decodeImageSize(buffer, format);
 
-          await writeFile(pathValidation.path, buffer);
+            const overPixels =
+              dims !== null && dims.width * dims.height > MAX_SCREENSHOT_PIXELS;
+            const overBytes = buffer.length > CONFIG.MAX_IMAGE_BYTES;
 
+            if (!overPixels && !overBytes) {
+              finalResult = result;
+              finalBuffer = buffer;
+              finalDims = dims;
+              finalScale = scale;
+              break;
+            }
+
+            const fPix = overPixels
+              ? Math.sqrt(MAX_SCREENSHOT_PIXELS / (dims.width * dims.height))
+              : 1;
+            const fByte = overBytes
+              ? Math.sqrt(CONFIG.MAX_IMAGE_BYTES / buffer.length)
+              : 1;
+            const correction = Math.min(fPix, fByte) * 0.98;
+
+            process.stderr.write(
+              `[MCP] Screenshot over limit (px=${dims ? `${dims.width}x${dims.height}` : 'unknown'}, ` +
+              `bytes=${buffer.length}); re-capturing scale=${((scale || 1) * correction).toFixed(3)}\n`
+            );
+
+            lastBuffer = buffer;
+            lastDims = dims;
+            scale = (scale || 1) * correction;
+            truncated = true;
+          }
+
+          if (!finalResult) {
+            return formatToolError(toolError(
+              ERRORS.SCREENSHOT_TOO_LARGE,
+              `Screenshot still exceeds limits after ${MAX_CAPTURE_ATTEMPTS} attempts ` +
+              `(px=${lastDims ? `${lastDims.width}x${lastDims.height}` : 'unknown'}, ` +
+              `bytes=${lastBuffer ? lastBuffer.length : 'unknown'}). ` +
+              'Use a smaller viewport or lower quality.'
+            ));
+          }
+
+          await writeFile(pathValidation.path, finalBuffer);
           resetIdleTimer();
+
+          const meta = {
+            path: pathValidation.path,
+            size: finalBuffer.length,
+            truncated,
+            scale: finalScale,
+            measured: finalDims !== null
+          };
+          if (finalDims) {
+            meta.width = finalDims.width;
+            meta.height = finalDims.height;
+          }
 
           return {
             content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  path: pathValidation.path,
-                  size: buffer.length,
-                  truncated
-                })
-              },
+              { type: 'text', text: JSON.stringify(meta) },
               {
                 type: 'image',
-                data: result.data,
+                data: finalResult.data,
                 mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png'
               }
             ]
           };
         } finally {
           if (emulationSet) {
-            await browser.send('Emulation.clearDeviceMetricsOverride', {}, 5000).catch(() => {});
+            if (previousViewport) {
+              await browser.applyViewport(previousViewport).catch(() => {});
+            } else {
+              await browser.send('Emulation.clearDeviceMetricsOverride', {}, 5000).catch(() => {});
+            }
           }
         }
 
@@ -1129,6 +1214,274 @@ registerTool(
       process.stderr.write(`[MCP] Scroll error: ${err.message}\n`);
       return formatToolError(err);
     }
+  }
+);
+
+registerTool(
+  'browser_resize',
+  'Resize the browser viewport (width/height, presets, or reset to default)',
+  {
+    preset: z.enum(['mobile', 'tablet', 'desktop']).optional(),
+    width: z.number().int().min(100).max(10000).optional(),
+    height: z.number().int().min(100).max(10000).optional(),
+    device_scale_factor: z.number().min(1).max(4).optional(),
+    mobile: z.boolean().optional(),
+    reset: z.boolean().optional(),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional()
+  },
+  async (args) => {
+    return runLocked(async () => {
+      // Validate the RAW arguments (not Zod-normalized) so `reset` and an empty
+      // call are distinguishable — see src/viewport.js.
+      let params;
+      try {
+        params = resolveViewportParams(args);
+      } catch (err) {
+        return formatToolError(err);
+      }
+
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        if (params.mode === 'reset') {
+          process.stderr.write('[MCP] Resetting viewport override\n');
+          await browser.clearViewport();
+          await waitForSettle(browser).catch(() => {});
+          resetIdleTimer();
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                resized: true,
+                width: null,
+                height: null,
+                deviceScaleFactor: null,
+                mobile: null,
+                preset: null,
+                reset: true
+              })
+            }]
+          };
+        }
+
+        const { viewport, preset } = params;
+        process.stderr.write(
+          `[MCP] Resizing viewport to ${viewport.width}x${viewport.height} ` +
+          `(dSF=${viewport.deviceScaleFactor}, mobile=${viewport.mobile})` +
+          `${preset ? ` preset=${preset}` : ''}\n`
+        );
+
+        try {
+          await browser.applyViewport(viewport);
+        } catch (err) {
+          return formatToolError(toolError(
+            ERRORS.VIEWPORT_APPLY_FAILED,
+            `Failed to apply viewport: ${err.message}`
+          ));
+        }
+
+        await waitForSettle(browser).catch(() => {});
+        resetIdleTimer();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              resized: true,
+              width: viewport.width,
+              height: viewport.height,
+              deviceScaleFactor: viewport.deviceScaleFactor,
+              mobile: viewport.mobile,
+              preset: preset ?? null,
+              reset: false
+            })
+          }]
+        };
+
+      } catch (err) {
+        process.stderr.write(`[MCP] Resize error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
+  }
+);
+
+registerTool(
+  'browser_evaluate',
+  'Evaluate a JavaScript expression in the page and return a JSON-serialized result',
+  {
+    expression: z.string().min(1).max(CONFIG.MAX_EVAL_LENGTH),
+    await_promise: z.boolean().optional().default(true),
+    user_gesture: z.boolean().optional().default(false),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  },
+  async ({ expression, await_promise, user_gesture, timeout_ms }) => {
+    // Security gate: never start the browser or run code unless explicitly enabled.
+    if (!isEvalJsEnabled()) {
+      return formatToolError(toolError(
+        ERRORS.EVAL_DISABLED,
+        'browser_evaluate is disabled. Set ENABLE_EVAL_JS=1 in the MCP server environment to enable it.'
+      ));
+    }
+
+    return runLocked(async () => {
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        const timeout = capTimeout(timeout_ms, CONFIG.TOOL_DEFAULT_TIMEOUT_MS);
+        // The expression itself is not logged (it may contain sensitive values).
+        process.stderr.write(`[MCP] Evaluating expression (length=${expression.length})\n`);
+
+        const serialized = await evaluateExpression(browser, expression, {
+          awaitPromise: await_promise,
+          userGesture: user_gesture,
+          timeoutMs: timeout
+        });
+
+        const rawValue = serialized.value === undefined ? null : serialized.value;
+        let json;
+        try {
+          json = JSON.stringify(rawValue);
+        } catch (err) {
+          json = JSON.stringify({ __type: 'unserializable', message: err.message });
+        }
+
+        const truncatedResult = truncateText(json === undefined ? 'null' : json, CONFIG.MAX_EVAL_LENGTH);
+        resetIdleTimer();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              result: truncatedResult.truncated ? truncatedResult.text : rawValue,
+              type: serialized.type,
+              truncated: truncatedResult.truncated
+            })
+          }]
+        };
+
+      } catch (err) {
+        process.stderr.write(`[MCP] Evaluate error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
+  }
+);
+
+registerTool(
+  'browser_hover',
+  'Hover the mouse over an element using its CSS selector',
+  {
+    selector: z.string(),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  },
+  async ({ selector, timeout_ms }) => {
+    return runLocked(async () => {
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        const timeout = capTimeout(timeout_ms, 10000);
+        process.stderr.write(`[MCP] Hovering element: ${selector}\n`);
+
+        const result = await hoverElement(browser, selector, timeout);
+        resetIdleTimer();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              hovered: true,
+              selector,
+              x: result.x,
+              y: result.y,
+              matchesHover: result.matchesHover
+            })
+          }]
+        };
+
+      } catch (err) {
+        process.stderr.write(`[MCP] Hover error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
+  }
+);
+
+registerTool(
+  'browser_press',
+  'Press a keyboard key, optionally focusing an element first',
+  {
+    key: z.string().min(1),
+    modifiers: z.array(z.enum(['Alt', 'Control', 'Meta', 'Shift'])).optional().default([]),
+    selector: z.string().optional(),
+    repeat: z.number().int().min(1).max(100).optional().default(1),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  },
+  async ({ key, modifiers, selector, repeat, timeout_ms }) => {
+    return runLocked(async () => {
+      // Validate the key before starting the browser.
+      let resolved;
+      try {
+        resolved = resolveKey(key, modifiers);
+      } catch (err) {
+        return formatToolError(err);
+      }
+
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        const timeout = capTimeout(timeout_ms, 10000);
+        // Never log a single-character key's value (may be sensitive input).
+        const displayKey = resolved.key.length === 1 ? '<char>' : resolved.key;
+        process.stderr.write(
+          `[MCP] Pressing key: ${displayKey}` +
+          `${modifiers.length ? ` (${modifiers.join('+')})` : ''}` +
+          `${selector ? ` on ${selector}` : ''} x${repeat}\n`
+        );
+
+        const result = await pressKey(browser, key, {
+          modifiers,
+          selector,
+          repeat,
+          timeoutMs: timeout
+        });
+        resetIdleTimer();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              pressed: true,
+              key: resolved.key,
+              modifiers,
+              count: repeat,
+              selector: selector ?? null,
+              focused: result.focused
+            })
+          }]
+        };
+
+      } catch (err) {
+        process.stderr.write(`[MCP] Press error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
   }
 );
 

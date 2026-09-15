@@ -62,6 +62,11 @@ export class Browser {
     this.failureReason = null;
     this.stderrLines = [];
     this.maxStderrLines = options.maxStderrLines || 100;
+    // Persistent viewport override applied by browser_resize. It lives on the
+    // Browser object (survives idle shutdown) and is re-applied after a
+    // restart/reconnect, since the Emulation override does not survive a new
+    // Chromium process.
+    this.viewport = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 3;
     this.restartAttempts = 0;
@@ -220,6 +225,7 @@ export class Browser {
             await this._enableDomains();
             this._setupConsoleListeners();
             this._setupDialogHandler();
+            await this._reapplyViewport();
             return;
           }
         }
@@ -300,6 +306,42 @@ export class Browser {
         // Dialog may already be gone; ignore.
       });
     });
+  }
+
+  /**
+   * Apply (and remember) a viewport override. Persisted in `this.viewport` so
+   * it can be re-applied after a restart/reconnect.
+   */
+  async applyViewport({ width, height, deviceScaleFactor = 1, mobile = false }) {
+    await this.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor,
+      mobile
+    });
+    this.viewport = { width, height, deviceScaleFactor, mobile };
+  }
+
+  /** Clear the viewport override and forget it. */
+  async clearViewport() {
+    await this.send('Emulation.clearDeviceMetricsOverride', {});
+    this.viewport = null;
+  }
+
+  /**
+   * Re-apply the remembered viewport override after the CDP session is
+   * (re)established. Called from `_connectToPage()` so it covers the initial
+   * start, WebSocket reconnect, and crash restart. Best-effort: a failure is
+   * logged, not thrown.
+   */
+  async _reapplyViewport() {
+    if (!this.viewport) return;
+    try {
+      await this.cdp.send('Emulation.setDeviceMetricsOverride', { ...this.viewport });
+      process.stderr.write('[Browser] Re-applied viewport override\n');
+    } catch (err) {
+      process.stderr.write(`[Browser] Failed to re-apply viewport: ${err.message}\n`);
+    }
   }
 
   /**

@@ -9,6 +9,8 @@ import {
   truncateConsole,
   formatMCPError,
   formatMCPResult,
+  isEvalJsEnabled,
+  decodeImageSize,
   ERRORS,
   CONFIG
 } from '../src/utils.js';
@@ -205,5 +207,66 @@ describe('formatMCPResult', () => {
     const result = formatMCPResult({ title: 'Test' });
     assert.equal(result.isError, false);
     assert.equal(result.data.title, 'Test');
+  });
+});
+
+describe('isEvalJsEnabled', () => {
+  const original = process.env.ENABLE_EVAL_JS;
+
+  function withEnv(value, fn) {
+    if (value === undefined) delete process.env.ENABLE_EVAL_JS;
+    else process.env.ENABLE_EVAL_JS = value;
+    try {
+      fn();
+    } finally {
+      if (original === undefined) delete process.env.ENABLE_EVAL_JS;
+      else process.env.ENABLE_EVAL_JS = original;
+    }
+  }
+
+  it('is disabled by default', () => {
+    withEnv(undefined, () => assert.equal(isEvalJsEnabled(), false));
+  });
+
+  it('accepts 1 / true / yes (case-insensitive)', () => {
+    withEnv('1', () => assert.equal(isEvalJsEnabled(), true));
+    withEnv('true', () => assert.equal(isEvalJsEnabled(), true));
+    withEnv('YES', () => assert.equal(isEvalJsEnabled(), true));
+  });
+
+  it('treats other values as disabled', () => {
+    withEnv('0', () => assert.equal(isEvalJsEnabled(), false));
+    withEnv('false', () => assert.equal(isEvalJsEnabled(), false));
+    withEnv('maybe', () => assert.equal(isEvalJsEnabled(), false));
+  });
+});
+
+describe('decodeImageSize', () => {
+  it('reads PNG dimensions from the IHDR header', () => {
+    const png = Buffer.alloc(24);
+    png.writeUInt32BE(0x89504e47, 0);
+    png.writeUInt32BE(500, 16);
+    png.writeUInt32BE(700, 20);
+    assert.deepEqual(decodeImageSize(png, 'png'), { width: 500, height: 700 });
+  });
+
+  it('reads JPEG dimensions from the SOF0 marker', () => {
+    const jpeg = Buffer.from([
+      0xff, 0xd8, // SOI
+      0xff, 0xc0, // SOF0
+      0x00, 0x11, // length
+      0x08,       // precision
+      0x01, 0x2c, // height = 300
+      0x01, 0xf4, // width = 500
+      0x00
+    ]);
+    assert.deepEqual(decodeImageSize(jpeg, 'jpeg'), { width: 500, height: 300 });
+  });
+
+  it('returns null for malformed or unsupported input', () => {
+    assert.equal(decodeImageSize(Buffer.alloc(24), 'png'), null);
+    assert.equal(decodeImageSize(Buffer.from('not an image'), 'jpeg'), null);
+    assert.equal(decodeImageSize(Buffer.alloc(24), 'webp'), null);
+    assert.equal(decodeImageSize('not a buffer', 'png'), null);
   });
 });

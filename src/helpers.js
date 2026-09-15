@@ -15,6 +15,8 @@
 // All helpers run in the page's main world and are plain functions.
 // ---------------------------------------------------------------------------
 
+import { resolveKey } from './keymap.js';
+
 export const IN_PAGE = {
   // document.querySelector. `this` is the document node.
   queryElement: `function(selector) {
@@ -239,6 +241,146 @@ export const IN_PAGE = {
       text: this.textContent || '',
       isContentEditable: this.isContentEditable === true
     };
+  }`,
+
+  // Is the element currently in the :hover state? `this` is the element.
+  isHovered: `function() {
+    try { return this.matches(':hover') === true; } catch (e) { return false; }
+  }`,
+
+  // Serialize an arbitrary in-page value into a JSON-safe structure, handling
+  // cycles, depth/property limits, DOM nodes, functions, BigInt/Symbol, Date,
+  // Error, Map and Set. `this` is the value; opts is passed as a CDP argument.
+  // Never built from user input — this is a fixed declaration.
+  serializeValue: `function(opts) {
+    var maxDepth = (opts && opts.maxDepth) || 4;
+    var maxProps = (opts && opts.maxProps) || 100;
+
+    function describeElement(el) {
+      var tag = el.tagName ? el.tagName.toLowerCase() : 'element';
+      var id = el.id ? '#' + el.id : '';
+      var cls = '';
+      if (el.classList && el.classList.length) {
+        cls = '.' + Array.prototype.slice.call(el.classList).join('.');
+      }
+      var text = '';
+      if (el.textContent) {
+        text = el.textContent.replace(/\\s+/g, ' ').trim().slice(0, 80);
+      }
+      return { __type: 'Element', tag: tag + id + cls, text: text };
+    }
+
+    function serialize(value, depth, seen) {
+      if (value === undefined) return { __type: 'undefined' };
+      if (value === null) return null;
+
+      var t = typeof value;
+
+      if (t === 'string' || t === 'boolean') return value;
+
+      if (t === 'number') {
+        if (Number.isNaN(value)) return { __type: 'number', value: 'NaN' };
+        if (!Number.isFinite(value)) {
+          return { __type: 'number', value: value > 0 ? 'Infinity' : '-Infinity' };
+        }
+        if (Object.is(value, -0)) return { __type: 'number', value: '-0' };
+        return value;
+      }
+
+      if (t === 'bigint') return { __type: 'bigint', value: String(value) };
+      if (t === 'symbol') return { __type: 'symbol', value: String(value) };
+      if (t === 'function') {
+        return { __type: 'function', name: value.name || '', length: value.length };
+      }
+
+      if (depth > maxDepth) {
+        return { __type: 'truncated', reason: 'maxDepth' };
+      }
+
+      if (seen.has(value)) return { __type: 'circular' };
+      seen.add(value);
+
+      try {
+        if (value instanceof Date) {
+          return {
+            __type: 'Date',
+            value: isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString()
+          };
+        }
+        if (value instanceof Error) {
+          return { __type: 'Error', name: value.name, message: value.message };
+        }
+        if (typeof Element !== 'undefined' && value instanceof Element) {
+          return describeElement(value);
+        }
+        if (typeof Node !== 'undefined' && value instanceof Node) {
+          return { __type: 'Node', name: value.nodeName };
+        }
+
+        if (Array.isArray(value)) {
+          var arr = [];
+          var len = Math.min(value.length, maxProps);
+          for (var i = 0; i < len; i++) {
+            arr.push(serialize(value[i], depth + 1, seen));
+          }
+          if (value.length > maxProps) {
+            arr.push({ __type: 'truncated', reason: 'maxItems', total: value.length });
+          }
+          return arr;
+        }
+
+        if (value instanceof Map) {
+          var entries = [];
+          var mCount = 0;
+          value.forEach(function(v, k) {
+            if (mCount < maxProps) {
+              entries.push([serialize(k, depth + 1, seen), serialize(v, depth + 1, seen)]);
+              mCount++;
+            }
+          });
+          if (value.size > maxProps) {
+            entries.push({ __type: 'truncated', reason: 'maxItems', total: value.size });
+          }
+          return { __type: 'Map', entries: entries };
+        }
+
+        if (value instanceof Set) {
+          var values = [];
+          var sCount = 0;
+          value.forEach(function(v) {
+            if (sCount < maxProps) {
+              values.push(serialize(v, depth + 1, seen));
+              sCount++;
+            }
+          });
+          if (value.size > maxProps) {
+            values.push({ __type: 'truncated', reason: 'maxItems', total: value.size });
+          }
+          return { __type: 'Set', values: values };
+        }
+
+        var out = {};
+        var keys = Object.keys(value);
+        var count = 0;
+        for (var j = 0; j < keys.length && count < maxProps; j++) {
+          var k2 = keys[j];
+          try {
+            out[k2] = serialize(value[k2], depth + 1, seen);
+          } catch (e) {
+            out[k2] = { __type: 'unserializable' };
+          }
+          count++;
+        }
+        if (keys.length > maxProps) {
+          out.__truncated = { reason: 'maxProps', total: keys.length };
+        }
+        return out;
+      } finally {
+        seen.delete(value);
+      }
+    }
+
+    return serialize(this, 0, new WeakSet());
   }`
 };
 
@@ -625,6 +767,199 @@ export async function waitForCondition(browser, { selector = null, text = null, 
   );
 }
 
+export async function isHovered(browser, elementId) {
+  const result = await callHelper(browser, IN_PAGE.isHovered, { objectId: elementId });
+  return result.value === true;
+}
+
+async function dispatchMouseMove(browser, x, y) {
+  await browser.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x,
+    y,
+    button: 'none'
+  }, DEFAULT_TIMEOUT_MS);
+}
+
+/**
+ * High-level hover: wait for element, check visibility, scroll into view,
+ * resolve an unobstructed point, move the real mouse there, and verify the
+ * :hover state. Some engines do not enter :hover on a single jump, so a
+ * nudge (move away then back) is attempted before giving up.
+ *
+ * Returns { x, y, matchesHover }.
+ */
+export async function hoverElement(browser, selector, timeoutMs = 10000) {
+  const elementId = await waitForElement(browser, selector, timeoutMs);
+
+  const visible = await isElementVisible(browser, elementId);
+  if (!visible) {
+    throw helperError(
+      `Element is not visible (hidden or zero-sized): ${selector}`,
+      'ELEMENT_HIDDEN'
+    );
+  }
+
+  await scrollIntoView(browser, elementId);
+  await sleep(100);
+  await waitForSettle(browser).catch(() => {});
+
+  let point = await getClickablePoint(browser, elementId);
+  if (point.covered) {
+    // Re-read once: the first read may predate the scroll settling.
+    await sleep(100);
+    await waitForSettle(browser).catch(() => {});
+    point = await getClickablePoint(browser, elementId);
+  }
+
+  await dispatchMouseMove(browser, point.x, point.y);
+  let matchesHover = await isHovered(browser, elementId);
+
+  if (!matchesHover) {
+    await dispatchMouseMove(browser, point.x + 1, point.y + 1);
+    await dispatchMouseMove(browser, point.x, point.y);
+    await waitForSettle(browser).catch(() => {});
+    matchesHover = await isHovered(browser, elementId);
+  }
+
+  await waitForSettle(browser).catch(() => {});
+  return { x: point.x, y: point.y, matchesHover };
+}
+
+async function dispatchKey(browser, resolved) {
+  const base = {
+    modifiers: resolved.modifiers,
+    key: resolved.key,
+    code: resolved.code,
+    windowsVirtualKeyCode: resolved.keyCode,
+    nativeVirtualKeyCode: resolved.keyCode
+  };
+
+  const hasText = typeof resolved.text === 'string';
+  await browser.send('Input.dispatchKeyEvent', {
+    type: hasText ? 'keyDown' : 'rawKeyDown',
+    ...base,
+    ...(hasText ? { text: resolved.text, unmodifiedText: resolved.text } : {})
+  }, DEFAULT_TIMEOUT_MS);
+
+  await browser.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    ...base
+  }, DEFAULT_TIMEOUT_MS);
+}
+
+/**
+ * High-level key press. When a selector is given the element is resolved,
+ * checked for visibility, scrolled into view and focused first. The key is
+ * resolved from `src/keymap.js` (never built from user input).
+ *
+ * Returns { focused }.
+ */
+export async function pressKey(browser, key, options = {}) {
+  const { modifiers = [], selector = null, repeat = 1, timeoutMs = 10000 } = options;
+
+  const resolved = resolveKey(key, modifiers);
+
+  let focused = false;
+  if (selector) {
+    const elementId = await waitForElement(browser, selector, timeoutMs);
+
+    const visible = await isElementVisible(browser, elementId);
+    if (!visible) {
+      throw helperError(
+        `Element is not visible (hidden or zero-sized): ${selector}`,
+        'ELEMENT_HIDDEN'
+      );
+    }
+
+    await scrollIntoView(browser, elementId);
+    await sleep(100);
+    await waitForSettle(browser).catch(() => {});
+    focused = await focusElement(browser, elementId);
+  }
+
+  for (let i = 0; i < repeat; i++) {
+    await dispatchKey(browser, resolved);
+  }
+
+  // Let submit/navigation handlers run and the compositor paint a frame so a
+  // screenshot in the next tool call is not blank.
+  await sleep(50);
+  await waitForSettle(browser).catch(() => {});
+
+  return { focused };
+}
+
+/**
+ * Evaluate an expression in the page and return a serialized result.
+ *
+ * Primitives come back directly; objects/functions/DOM nodes are serialized
+ * by the static IN_PAGE.serializeValue helper (never from user input). The
+ * remote object handle is always released.
+ *
+ * Returns { type, value }. Throws an error with code EVAL_ERROR on an
+ * in-page exception.
+ */
+export async function evaluateExpression(browser, expression, options = {}) {
+  const { awaitPromise = true, userGesture = false, timeoutMs = 10000 } = options;
+
+  const evalResult = await browser.send('Runtime.evaluate', {
+    expression,
+    returnByValue: false,
+    awaitPromise,
+    userGesture,
+    generatePreview: true
+  }, timeoutMs);
+
+  if (evalResult.exceptionDetails) {
+    const details = evalResult.exceptionDetails;
+    const description =
+      details.exception?.description || details.text || 'Unknown evaluation error';
+    throw helperError(description, 'EVAL_ERROR');
+  }
+
+  const remote = evalResult.result;
+  if (!remote) {
+    return { type: 'undefined', value: undefined };
+  }
+
+  if (remote.type === 'undefined') {
+    return { type: 'undefined', value: undefined };
+  }
+  if (remote.type === 'string' || remote.type === 'boolean') {
+    return { type: remote.type, value: remote.value };
+  }
+  if (remote.type === 'number') {
+    if (remote.unserializableValue) {
+      return { type: 'number', value: remote.unserializableValue };
+    }
+    return { type: 'number', value: remote.value };
+  }
+  if (remote.type === 'bigint') {
+    return { type: 'bigint', value: remote.unserializableValue || String(remote.value) };
+  }
+  if (remote.type === 'symbol') {
+    return { type: 'symbol', value: remote.description || 'Symbol()' };
+  }
+
+  if (remote.objectId) {
+    try {
+      const serialized = await callHelper(browser, IN_PAGE.serializeValue, {
+        objectId: remote.objectId,
+        args: [{ maxDepth: 4, maxProps: 100 }],
+        returnByValue: true,
+        timeoutMs
+      });
+      return { type: remote.subtype || remote.type || 'object', value: serialized.value };
+    } finally {
+      await browser.send('Runtime.releaseObject', { objectId: remote.objectId }, 5000)
+        .catch(() => {});
+    }
+  }
+
+  return { type: remote.type || 'object', value: remote.value === undefined ? null : remote.value };
+}
+
 export default {
   IN_PAGE,
   normalizeWhitespace,
@@ -646,5 +981,9 @@ export default {
   waitForText,
   clickElement,
   typeIntoElement,
-  waitForCondition
+  waitForCondition,
+  isHovered,
+  hoverElement,
+  pressKey,
+  evaluateExpression
 };
