@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
-import { ERRORS, formatMCPError, capTimeout, CONFIG } from './utils.js';
+import { capTimeout, CONFIG } from './utils.js';
 
 export class CDPClient extends EventEmitter {
   constructor(options = {}) {

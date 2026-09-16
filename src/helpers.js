@@ -72,14 +72,30 @@ export const IN_PAGE = {
     return { scrollX: window.scrollX, scrollY: window.scrollY };
   }`,
 
-  // Scroll to absolute document coordinates. `this` is unused; runs in page.
+  // Scroll to absolute document coordinates. A null axis keeps its current
+  // position, so a caller can scroll a single axis. `this` is unused; runs in page.
   scrollToPosition: `function(x, y) {
-    window.scrollTo({ top: y, left: x, behavior: 'instant' });
+    window.scrollTo({
+      top: (y === null || y === undefined) ? window.scrollY : y,
+      left: (x === null || x === undefined) ? window.scrollX : x,
+      behavior: 'instant'
+    });
     return { scrollX: window.scrollX, scrollY: window.scrollY };
   }`,
 
-  // Is this element fully within the current viewport?
+  // Does any part of this element intersect the current viewport? This is the
+  // meaning callers expect from "inViewport": partially visible counts.
   isInViewport: `function() {
+    const rect = this.getBoundingClientRect();
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    return rect.bottom > 0 && rect.right > 0 &&
+      rect.top < vh && rect.left < vw;
+  }`,
+
+  // Is this element entirely within the current viewport? An element taller
+  // than the viewport can never satisfy this.
+  isFullyInViewport: `function() {
     const rect = this.getBoundingClientRect();
     const vw = window.innerWidth || document.documentElement.clientWidth;
     const vh = window.innerHeight || document.documentElement.clientHeight;
@@ -408,6 +424,18 @@ function helperError(message, code) {
   return err;
 }
 
+/**
+ * ELEMENT_HIDDEN error: the element exists but is not rendered (display:none,
+ * visibility:hidden, opacity:0, or zero-sized). `remedy` carries the
+ * tool-specific advice, since what to do about it differs per tool.
+ */
+function elementHiddenError(selector, remedy) {
+  return helperError(
+    `Element is not visible (hidden, transparent, or zero-sized): ${selector}. ${remedy}`,
+    'ELEMENT_HIDDEN'
+  );
+}
+
 async function evaluateDocument(browser, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const result = await browser.send('Runtime.evaluate', {
     expression: 'document',
@@ -527,11 +555,12 @@ export async function scrollByDirection(browser, direction, pixels) {
 }
 
 /**
- * Scroll to absolute document coordinates. Returns { scrollX, scrollY }.
+ * Scroll to absolute document coordinates. A null axis keeps its current
+ * position. Returns { scrollX, scrollY }.
  */
 export async function scrollToPosition(browser, x, y) {
   const result = await callHelper(browser, IN_PAGE.scrollToPosition, {
-    args: [x, y],
+    args: [x ?? null, y ?? null],
     returnByValue: true
   });
   await sleep(100);
@@ -540,8 +569,9 @@ export async function scrollToPosition(browser, x, y) {
 }
 
 /**
- * Scroll the target element into view and verify it is inside the viewport.
- * Returns { scrollX, scrollY, inViewport }.
+ * Scroll the target element into view and report its visibility. `inViewport`
+ * means any part is visible; `fullyInViewport` means all of it fits.
+ * Returns { scrollX, scrollY, inViewport, fullyInViewport }.
  */
 export async function scrollToElement(browser, selector, timeoutMs = 10000) {
   const elementId = await waitForElement(browser, selector, timeoutMs);
@@ -552,13 +582,18 @@ export async function scrollToElement(browser, selector, timeoutMs = 10000) {
     objectId: elementId,
     returnByValue: true
   });
+  const fullyInViewport = await callHelper(browser, IN_PAGE.isFullyInViewport, {
+    objectId: elementId,
+    returnByValue: true
+  });
   const position = await callHelper(browser, IN_PAGE.getScrollPosition, {
     returnByValue: true
   });
   return {
     scrollX: position.value.scrollX,
     scrollY: position.value.scrollY,
-    inViewport: inViewport.value === true
+    inViewport: inViewport.value === true,
+    fullyInViewport: fullyInViewport.value === true
   };
 }
 
@@ -644,9 +679,9 @@ export async function clickElement(browser, selector, timeoutMs, options = {}) {
 
       const visible = await isElementVisible(browser, elementId);
       if (!visible) {
-        throw helperError(
-          `Element is not visible (hidden or zero-sized): ${selector}`,
-          'ELEMENT_HIDDEN'
+        throw elementHiddenError(
+          selector,
+          'If it only appears on hover, run browser_hover first; otherwise retry with force:true to click it anyway.'
         );
       }
 
@@ -794,9 +829,9 @@ export async function hoverElement(browser, selector, timeoutMs = 10000) {
 
   const visible = await isElementVisible(browser, elementId);
   if (!visible) {
-    throw helperError(
-      `Element is not visible (hidden or zero-sized): ${selector}`,
-      'ELEMENT_HIDDEN'
+    throw elementHiddenError(
+      selector,
+      'It must be rendered before it can be hovered — wait for it to appear or check the selector.'
     );
   }
 
@@ -866,9 +901,9 @@ export async function pressKey(browser, key, options = {}) {
 
     const visible = await isElementVisible(browser, elementId);
     if (!visible) {
-      throw helperError(
-        `Element is not visible (hidden or zero-sized): ${selector}`,
-        'ELEMENT_HIDDEN'
+      throw elementHiddenError(
+        selector,
+        'It must be rendered before it can be focused — wait for it to appear or check the selector.'
       );
     }
 

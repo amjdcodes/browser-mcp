@@ -110,6 +110,63 @@ describe('Reading Tools', () => {
     }
   });
 
+  describe('browser_get_url', () => {
+    it('reports the current url, title and ready state', async () => {
+      serverProc = spawn('node', ['index.js'], {
+        cwd: '/root/browser-mcp',
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await initializeServer(serverProc);
+
+      await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'browser_navigate',
+          arguments: { url: `http://127.0.0.1:${testPort}/` }
+        }
+      });
+
+      const response = await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'browser_get_url', arguments: {} }
+      });
+
+      assert.notEqual(response.result.isError, true);
+      const result = JSON.parse(response.result.content[0].text);
+      assert.equal(result.url, `http://127.0.0.1:${testPort}/`);
+      assert.equal(result.title, 'Test Page - صفحة الاختبار');
+      assert.equal(result.readyState, 'complete');
+
+      // A hash-only navigation must be reflected too — this is the case where
+      // the caller otherwise has no way to tell where the page ended up.
+      await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'browser_navigate',
+          arguments: { url: `http://127.0.0.1:${testPort}/#far-section` }
+        }
+      });
+
+      const afterHash = await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: { name: 'browser_get_url', arguments: {} }
+      });
+
+      const hashResult = JSON.parse(afterHash.result.content[0].text);
+      assert.equal(hashResult.url, `http://127.0.0.1:${testPort}/#far-section`);
+    });
+  });
+
   describe('browser_get_text', () => {
     it('gets body text without selector', async () => {
       serverProc = spawn('node', ['index.js'], {
@@ -446,6 +503,53 @@ describe('Reading Tools', () => {
       assert.equal(response.result.isError, true);
       assert.ok(response.result.content[0].text.includes('traversal'));
     });
+
+    it('resolves the extension from format instead of appending a second one', async () => {
+      serverProc = spawn('node', ['index.js'], {
+        cwd: '/root/browser-mcp',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, OUTPUT_DIR: `/tmp/screenshot-ext-${process.pid}` }
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await initializeServer(serverProc);
+
+      await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'browser_navigate',
+          arguments: { url: `http://127.0.0.1:${testPort}/` }
+        }
+      });
+
+      const cases = [
+        { args: { filename: '01-hero.png' }, expected: '01-hero.jpg' },
+        { args: { filename: '01-hero.png', format: 'png' }, expected: '01-hero.png' },
+        { args: { filename: 'already.jpeg' }, expected: 'already.jpeg' },
+        { args: { filename: 'photo.webp', format: 'png' }, expected: 'photo.png' },
+        { args: { filename: 'shot-format', format: 'png' }, expected: 'shot-format.png' },
+        { args: { filename: 'needs-ext' }, expected: 'needs-ext.jpg' }
+      ];
+
+      let id = 3;
+      for (const { args, expected } of cases) {
+        const response = await sendRequest(serverProc, {
+          jsonrpc: '2.0',
+          id: id++,
+          method: 'tools/call',
+          params: { name: 'browser_screenshot', arguments: args }
+        });
+
+        assert.notEqual(response.result.isError, true);
+        const result = JSON.parse(response.result.content[0].text);
+        assert.ok(
+          result.path.endsWith(expected),
+          `expected a path ending in "${expected}", got "${result.path}"`
+        );
+      }
+    });
   });
 
   describe('browser_get_console', () => {
@@ -569,6 +673,21 @@ describe('Reading Tools', () => {
       
       const textboxes = result.elements.filter(e => e.role === 'textbox');
       assert.ok(textboxes.length > 0);
+
+      // Snapshot advertises the browser_evaluate gate so a caller can discover
+      // it without attempting a call. The advertisement must be truthful,
+      // whichever way ENABLE_EVAL_JS is set in the environment.
+      const evalResponse = await sendRequest(serverProc, {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'browser_evaluate', arguments: { expression: '1' } }
+      });
+      assert.equal(
+        result.evaluateEnabled,
+        evalResponse.result.isError !== true,
+        'the advertised evaluate gate must match the tool behavior'
+      );
     });
 
     it('respects max_items limit', async () => {

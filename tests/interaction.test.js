@@ -195,6 +195,10 @@ describe('browser_click', () => {
     assert.equal(response.result.isError, true);
     assert.ok(resultText(response).includes('ELEMENT_HIDDEN'));
     assert.ok(resultText(response).includes('not visible'));
+    assert.ok(
+      resultText(response).includes('force:true'),
+      'the error must point at the way out (force:true)'
+    );
   });
 
   it('fails with ELEMENT_NOT_FOUND when the element never exists', async () => {
@@ -744,7 +748,16 @@ describe('browser_scroll', () => {
     }));
     assert.equal(result.mode, 'element');
     assert.equal(result.inViewport, true);
+    assert.equal(result.fullyInViewport, true, 'a short element fits entirely');
     assert.ok(result.scrollY > 0);
+  });
+
+  it('reports a tall element as in the viewport but not fully visible', async () => {
+    const result = assertSuccess(await callTool(state, 'browser_scroll', {
+      selector: '#tall-spacer'
+    }));
+    assert.equal(result.inViewport, true, 'partial visibility counts as in the viewport');
+    assert.equal(result.fullyInViewport, false, 'a 1500px element cannot fit the viewport');
   });
 
   it('scrolls to absolute coordinates', async () => {
@@ -777,9 +790,21 @@ describe('browser_scroll', () => {
     assertToolError(response, 'INVALID_ARGS', /exactly one/);
   });
 
-  it('rejects x without y', async () => {
-    const response = await callTool(state, 'browser_scroll', { x: 100 });
-    assertToolError(response, 'INVALID_ARGS', /Both x and y/);
+  it('scrolls vertically when only y is provided', async () => {
+    await callTool(state, 'browser_scroll', { direction: 'top' });
+    const result = assertSuccess(await callTool(state, 'browser_scroll', { y: 600 }));
+    assert.equal(result.mode, 'position');
+    assert.equal(result.scrollY, 600);
+    assert.equal(result.x, null, 'the omitted axis is reported as null');
+  });
+
+  it('leaves the other axis untouched when only one is provided', async () => {
+    const seeded = assertSuccess(await callTool(state, 'browser_scroll', { x: 120, y: 20 }));
+    assert.ok(seeded.scrollX > 0, 'fixture must overflow horizontally for this check');
+
+    const result = assertSuccess(await callTool(state, 'browser_scroll', { y: 400 }));
+    assert.equal(result.scrollY, 400);
+    assert.equal(result.scrollX, seeded.scrollX, 'the horizontal offset must be preserved');
   });
 
   it('scroll completes synchronously (instant, no animation in flight)', async () => {

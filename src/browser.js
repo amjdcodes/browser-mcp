@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CDPClient } from './cdp.js';
 import { ConsoleBuffer } from './console-buffer.js';
-import { ERRORS, formatMCPError } from './utils.js';
+import { ERRORS } from './utils.js';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -18,6 +18,11 @@ const KNOWN_PATHS = [
 const DEFAULT_FLAGS = [
   '--headless',
   '--no-sandbox',
+  // NOTE: no --window-size. A desktop-sized default (1440x900) was measured to
+  // make the first viewport capture ~5x more expensive (software rendering on
+  // ARM), pushing a single screenshot past 30s and timing out the suite. The
+  // default stays at Chromium's own 780x437; call browser_resize when a desktop
+  // layout is needed.
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--disable-gpu-compositing',
@@ -67,6 +72,9 @@ export class Browser {
     // restart/reconnect, since the Emulation override does not survive a new
     // Chromium process.
     this.viewport = null;
+    // Set by a crash restart; the first tool call afterwards reports it so the
+    // client knows the old page state is gone.
+    this.sessionReset = false;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 3;
     this.restartAttempts = 0;
@@ -102,7 +110,7 @@ export class Browser {
     }
   }
 
-  async start() {
+  async start({ preserveProfile = false } = {}) {
     if (this.state !== STATES.STOPPED && this.state !== STATES.FAILED) {
       throw new Error(`Cannot start: state is ${this.state}`);
     }
@@ -115,8 +123,22 @@ export class Browser {
     const execPath = this.findChromiumPath();
     process.stderr.write(`[Browser] Found Chromium at: ${execPath}\n`);
 
-    this.profileDir = mkdtempSync(join(tmpdir(), 'browser-mcp-'));
-    process.stderr.write(`[Browser] Profile dir: ${this.profileDir}\n`);
+    // A crash restart reuses the existing profile so the page's stored state
+    // (localStorage, session storage, cookies) survives. A fresh start — and
+    // any start after a graceful cleanup — gets a new directory.
+    if (preserveProfile && this.profileDir && existsSync(this.profileDir)) {
+      process.stderr.write(`[Browser] Reusing profile: ${this.profileDir}\n`);
+      // A killed Chromium leaves its singleton lock and DevToolsActivePort
+      // behind. Without clearing them the new instance delegates to the dead
+      // one and exits immediately, and the stale port file would be read as
+      // this instance's CDP port.
+      for (const stale of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort']) {
+        rmSync(join(this.profileDir, stale), { force: true });
+      }
+    } else {
+      this.profileDir = mkdtempSync(join(tmpdir(), 'browser-mcp-'));
+      process.stderr.write(`[Browser] Profile dir: ${this.profileDir}\n`);
+    }
 
     const args = [
       ...DEFAULT_FLAGS,
@@ -404,8 +426,10 @@ export class Browser {
     process.stderr.write(`[Browser] Restart attempt ${this.restartAttempts}/${this.maxRestartAttempts}\n`);
 
     try {
-      await this.cleanup();
-      await this.start();
+      // Preserve the profile so the page's stored state survives the restart.
+      await this.cleanup({ removeProfile: false });
+      await this.start({ preserveProfile: true });
+      this.sessionReset = true;
     } catch (err) {
       this.state = STATES.FAILED;
       const fail = new Error(`Chromium restart failed: ${err.message}`);
@@ -466,7 +490,7 @@ export class Browser {
     }
   }
 
-  async cleanup() {
+  async cleanup({ removeProfile = true } = {}) {
     if (this._cleanupDone) return;
     this._cleanupDone = true;
 
@@ -509,27 +533,41 @@ export class Browser {
     }
 
     if (this.profileDir) {
-      // Chromium children may survive the main process and recreate the
-      // profile dir; kill them first, then remove with retries (a child
-      // finishing its exit can hold the directory for a few hundred ms).
+      // Chromium children may survive the main process and recreate or hold the
+      // profile dir; reap them either way before touching the directory.
       const profile = this.profileDir;
       this._killChildrenByProfile(profile);
-      for (let attempt = 0; attempt < 8; attempt++) {
-        try {
-          rmSync(profile, { recursive: true, force: true });
-          process.stderr.write(`[Browser] Cleaned up profile: ${profile}\n`);
-          break;
-        } catch {
-          this._killChildrenByProfile(profile);
-          await sleep(250);
+
+      if (removeProfile) {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          try {
+            rmSync(profile, { recursive: true, force: true });
+            process.stderr.write(`[Browser] Cleaned up profile: ${profile}\n`);
+            break;
+          } catch {
+            this._killChildrenByProfile(profile);
+            await sleep(250);
+          }
         }
+        this.profileDir = null;
+      } else {
+        process.stderr.write(`[Browser] Keeping profile for restart: ${profile}\n`);
       }
-      this.profileDir = null;
     }
 
     this.port = null;
     this.state = STATES.STOPPED;
     process.stderr.write(`[Browser] Cleanup complete\n`);
+  }
+
+  /**
+   * Whether a crash restart happened since the last check. Reading clears the
+   * flag, so only the first tool call after a restart reports the reset.
+   */
+  consumeSessionReset() {
+    const reset = this.sessionReset;
+    this.sessionReset = false;
+    return reset;
   }
 
   get isReady() {

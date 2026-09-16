@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-stdio%20JSON--RPC-blue)
 ![Chromium](https://img.shields.io/badge/Chromium-150.0.7871.100-4285F4?logo=googlechrome&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-aarch64%20%C2%B7%20x86__64-lightgrey)
-![Tests](https://img.shields.io/badge/tests-258%20(node%3Atest)-blue)
+![Tests](https://img.shields.io/badge/tests-268%20(node%3Atest)-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 # browser-mcp
@@ -18,7 +18,7 @@
 
 `browser-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives an AI client — Codex CLI, Claude Code, opencode, or any MCP-capable host — a real browser it can read from and interact with. It implements the protocol over stdio and controls headless Chromium directly through the Chrome DevTools Protocol (CDP) WebSocket, so there is no Puppeteer/Playwright layer to install, pin, or fight with.
 
-The server exposes thirteen tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, and `browser_press`. Together they cover the common agent loop — open a page, snapshot the interactive elements, resize the viewport, click and type, hover and press keys, wait for state to change, evaluate page JavaScript, and capture the result as an image or text.
+The server exposes fourteen tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, and `browser_press`. Together they cover the common agent loop — open a page, snapshot the interactive elements, resize the viewport, click and type, hover and press keys, wait for state to change, evaluate page JavaScript, find out where the page ended up, and capture the result as an image or text.
 
 It is built for resource-constrained and ARM64 environments. Chromium launches lazily on the first tool call, shuts itself down after an idle period, and cleans up its process group and temporary profile so repeated start/stop cycles leak neither memory nor browser processes. State-changing operations are serialized behind a single lock, and reading operations wait for any in-flight navigation, so concurrent tool calls cannot race the page.
 
@@ -28,19 +28,20 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ## Key Features
 
-- **Thirteen browser tools over MCP stdio** — navigation, text extraction, screenshots, console capture, accessibility snapshots, clicks, typing, waiting, scrolling, viewport resizing, JavaScript evaluation, hovering, and key presses.
+- **Fourteen browser tools over MCP stdio** — navigation, current-URL lookup, text extraction, screenshots, console capture, accessibility snapshots, clicks, typing, waiting, scrolling, viewport resizing, JavaScript evaluation, hovering, and key presses.
 - **Raw CDP, zero browser-framework dependencies** — only `@modelcontextprotocol/sdk`, `ws`, and `zod`; no Puppeteer or Playwright.
 - **ARM64-native** — developed and verified on aarch64 (see [Tested Versions](#tested-versions)).
 - **Lazy browser start** — Chromium launches on the first tool call, not at server startup.
 - **Idle shutdown** — the browser stops after inactivity (default 5 min) while the MCP server stays alive and restarts it on demand. Idle never interrupts an in-flight tool call, and any new request extends the window.
-- **Crash recovery** — automatic WebSocket reconnect to the same process (exponential backoff) and full Chromium restart on crash (up to 2 attempts). A `browser_resize` viewport override is re-applied automatically after a restart.
+- **Crash recovery that keeps your session** — automatic WebSocket reconnect to the same process (exponential backoff) and a full Chromium restart on crash (up to 2 attempts) that **reuses the profile**, so `localStorage` and session state survive. The first successful result afterwards carries a `{ sessionReset: true }` marker, so a client never mistakes a blank page for its own bug. A `browser_resize` viewport override is re-applied automatically after a restart.
 - **Operation lock** — state-changing operations are serialized; the FIFO queue is capped at `QUEUE_LIMIT` (8) and rejects with `BUSY_QUEUE_FULL`, with a 5-minute watchdog backstop.
 - **Navigation race guard** — reading tools wait for any in-flight navigation before touching the page.
 - **Persistent viewport control** — `browser_resize` applies mobile/tablet/desktop presets or explicit sizes; the override survives navigation, idle shutdown, and a full-page screenshot (restored, never silently cleared).
 - **Measured screenshot limits** — the real PNG/JPEG dimensions are decoded from the captured buffer and the byte size checked; oversized captures are downscaled via `clip.scale` (never cropped) and re-captured once, catching `mobile: true` page-scale inflation the pre-capture estimate misses.
-- **Gated JavaScript evaluation** — `browser_evaluate` is disabled by default and refused with `EVAL_DISABLED` unless `ENABLE_EVAL_JS=1`; results are serialized in-page (cycles, DOM, functions, Map/Set, BigInt) and truncated to `MAX_EVAL_LENGTH`.
+- **Gated JavaScript evaluation** — `browser_evaluate` is disabled by default and refused with `EVAL_DISABLED` unless `ENABLE_EVAL_JS=1`; results are serialized in-page (cycles, DOM, functions, Map/Set, BigInt) and truncated to `MAX_EVAL_LENGTH`. `browser_snapshot` advertises the gate as `evaluateEnabled`, so the state is discoverable without a failed call.
 - **Keyboard and hover control** — `browser_press` resolves named keys and characters (`src/keymap.js`) and fires default actions (form submit, focus traversal); `browser_hover` moves the real mouse and reports `matchesHover`.
-- **Reliable full-page screenshots** — scrolls the page to trigger lazy/IntersectionObserver rendering, temporarily matches the viewport to the page height, and downscales oversized pages via `clip.scale` instead of cropping them.
+- **Reliable full-page screenshots** — scrolls the page to trigger lazy/IntersectionObserver rendering, then captures the whole document with `captureBeyondViewport`. The viewport is deliberately **not** resized to the page height: doing that recomputed the layout against a fake viewport (`100vh` inflated, `position: fixed` elements smeared across the image) and visibly broke RTL pages. Oversized pages are downscaled via `clip.scale` instead of being cropped.
+- **Measured, not assumed, viewport** — `browser_resize` returns the requested size *and* what the page actually reports (`innerWidth`/`innerHeight`/`devicePixelRatio`/`scrollX`/`scrollWidth`), plus a `warning` when the document overflows the requested width instead of implying the values matched.
 - **Same-document navigation handling** — hash-only URL changes are detected and handled via `Page.navigatedWithinDocument`, so they never wait for a load event that never fires.
 - **Modal dialog auto-dismiss** — `alert`/`confirm`/`prompt` dialogs are dismissed automatically so automation never hangs.
 - **Injection-proof interaction** — CSS selectors and typed text travel as CDP `arguments` values, never concatenated into JavaScript source; typed text is never logged.
@@ -59,7 +60,7 @@ Use it when you want browser automation available to an AI assistant without bun
                                    ▼
   ┌───────────────────────────────────────────────────────────────┐
   │  Protocol / Interface       index.js                          │
-  │  MCP server · 13 tool handlers · result + image content       │
+  │  MCP server · 14 tool handlers · result + image content       │
   └───────────────────────────────┬───────────────────────────────┘
                                   ▼
   ┌───────────────────────────────────────────────────────────────┐
@@ -84,7 +85,7 @@ Use it when you want browser automation available to an AI assistant without bun
 
 | Layer | Responsibility | Key Components |
 |-------|---------------|----------------|
-| Protocol / Interface | Speak MCP over stdio and expose the thirteen tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
+| Protocol / Interface | Speak MCP over stdio and expose the fourteen tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
 | Orchestration | Serialize state-changing work, track activity, coordinate navigation, shut down when idle | `OperationLock` / `withLock`, `withActivityTracking`, `resetIdleTimer`, `navigationPromise`, `ensureBrowserReady` |
 | Service / Engine | Drive Chromium, correlate CDP traffic, run in-page helpers, buffer console output, validate input | `Browser`, `CDPClient`, `helpers.js` runners + `IN_PAGE` functions, `ConsoleBuffer`, `utils.js` |
 | Infrastructure | Own the browser process, WebSocket, temp profile, screenshot files, and versioned diagnostics | Chromium child process, `DevToolsActivePort`, profile dir under `tmpdir()`, `OUTPUT_DIR`, stderr |
@@ -93,9 +94,9 @@ Use it when you want browser automation available to an AI assistant without bun
 
 - **No `Page.loadEventFired` for hash navigations.** The navigate handler compares origin/pathname/search before navigating; a hash-only change is awaited on `Page.navigatedWithinDocument` with a ~200 ms + double-rAF settle so the next screenshot is not blank (`index.js`).
 - **Viewport screenshots pass no `clip`.** A clip with `captureBeyondViewport: false` yields a blank frame on scrolled pages because clip coordinates are page-space; omitting the clip captures the current viewport correctly.
-- **Full-page screenshots change emulation state**, so they run behind the operation lock and always reset `Emulation.clearDeviceMetricsOverride` in a `finally` block.
+- **Full-page screenshots never touch the viewport.** They capture the whole document with a clip plus `captureBeyondViewport: true`. Resizing the viewport to the document height made `100vh` elements fill the image and stretched `position: fixed` elements into a smear — the classic full-page RTL bug.
 - **Helpers are static strings.** `Runtime.callFunctionOn` receives fixed function declarations; selectors and text are separate `arguments` entries (`src/helpers.js`).
-- **Cleanup kills the process group by profile path.** Orphaned Chromium children carry `--user-data-dir=<profile>` in their cmdline; `cleanup()` scans `/proc`, kills them, then removes the profile with retries (`src/browser.js`).
+- **Cleanup kills by PID, then reaps orphans by profile path.** Chromium children carry `--user-data-dir=<profile>` in their cmdline; `cleanup()` scans `/proc`, kills them, then removes the profile with retries (`src/browser.js`). A crash restart keeps the profile instead, clearing the stale `SingletonLock`/`DevToolsActivePort` files first so the new instance does not delegate to the dead one and exit.
 
 ---
 
@@ -103,9 +104,9 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ```
 browser-mcp/
-├── index.js                  # MCP server entry point: 13 tool registrations, lock, idle timer
+├── index.js                  # MCP server entry point: 14 tool registrations, lock, idle timer
 ├── src/
-│   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, restart, cleanup
+│   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, crash restart (profile kept), cleanup
 │   ├── cdp.js                # Raw CDP WebSocket client (request/response correlation, events)
 │   ├── helpers.js            # In-page helpers (IN_PAGE) + node-side runners (click/type/wait/scroll/hover/press/evaluate)
 │   ├── keymap.js             # Key resolution for browser_press (named keys + characters)
@@ -113,7 +114,7 @@ browser-mcp/
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, isEvalJsEnabled, CONFIG
-├── tests/                    # 258 tests across 22 files (node:test + node:assert/strict)
+├── tests/                    # 268 tests across 22 files (node:test + node:assert/strict)
 │   ├── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
 │   ├── utils.test.js         # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js      # viewport.js presets and raw-argument validation
@@ -127,21 +128,22 @@ browser-mcp/
 │   ├── lazy-start.test.js    # Browser starts only on first tool call
 │   ├── idle-shutdown.test.js # Idle timeout behavior
 │   ├── mcp-handshake.test.js # MCP protocol handshake
-│   ├── integration.test.js   # End-to-end navigation/reading
-│   ├── reading-tools.test.js # get_text / get_console / snapshot
+│   ├── integration.test.js   # End-to-end navigation/reading + full-page pixel checks
+│   ├── reading-tools.test.js # get_url / get_text / get_console / snapshot / screenshot
 │   ├── interaction.test.js   # click / type / wait_for / scroll
-│   ├── resize.test.js        # resize: explicit/presets/reset, persistence, full_page survival
+│   ├── resize.test.js        # resize: explicit/presets/reset, measured values, full_page survival
 │   ├── evaluate.test.js      # evaluate: gate, primitives, DOM, cycles, promises, exceptions
 │   ├── hover-press.test.js   # hover and key press (Enter/Tab/Escape/modifiers)
 │   ├── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
 │   ├── parallel.test.js      # Concurrent instances and lock serialization
 │   ├── memory.test.js        # Truncation and memory-bound behavior
-│   └── cleanup.test.js       # Process and profile cleanup, no leaks
+│   └── cleanup.test.js       # Process and profile cleanup, orphan reaping, no leaks
 ├── fixtures/                 # Test HTML pages
 │   ├── test-page.html        # Shared interactive fixture
 │   ├── page2.html            # Navigation target
 │   ├── lazy-page.html        # Lazy/IntersectionObserver rendering
-│   └── tall-page.html        # Full-page screenshot fixture
+│   ├── tall-page.html        # Full-page screenshot fixture (3000×19400)
+│   └── rtl-page.html         # Arabic RTL: fixed sidebar + 100vh hero
 ├── screenshots/              # Screenshot output directory (runtime, override with OUTPUT_DIR)
 ├── stress-test.sh            # Start/stop cycles: Chromium leak + RSS growth check
 ├── install-chromium.sh       # Installs Chromium (Debian archive on Ubuntu, APT-pinned)
@@ -288,6 +290,7 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 | Tool | Mode | Locked | Purpose |
 |------|------|--------|---------|
 | `browser_navigate` | state-changing | ✅ | Navigate to a URL (validated) |
+| `browser_get_url` | reading | — | Read the current URL, title, and ready state |
 | `browser_get_text` | reading | — | Read body text or a specific element |
 | `browser_screenshot` | reading / state-changing | ✅ when `full_page` | Capture the viewport or the full page |
 | `browser_get_console` | reading | — | Read buffered console messages |
@@ -314,6 +317,17 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 { "name": "browser_navigate", "arguments": { "url": "https://example.com" } }
 ```
 
+### browser_get_url
+
+- **Params**: none
+- **Returns**: `{ url, title, readyState }`
+- **Behavior**: reads `window.location.href`, `document.title`, and `document.readyState`. This is how you ask where the page currently is — after a click that navigated, or after a same-document (hash) navigation that `browser_navigate`'s result may have been consumed for. Read-only, never locked.
+- **After a crash restart** it reports `about:blank`; the same result carries the `sessionReset` marker described in [Key Features](#key-features)
+
+```json
+{ "name": "browser_get_url", "arguments": {} }
+```
+
 ### browser_get_text
 
 - **Params**: `selector` (string, optional — omit for the whole body), `timeout_ms` (default 10000)
@@ -329,9 +343,10 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 
 - **Params**: `filename` (optional, auto-generated), `format` (`jpeg`|`png`, default `jpeg`), `quality` (1–100, default 80), `full_page` (boolean, default false), `delay_ms` (0–5000, default 0)
 - **Returns**: `{ path, size, truncated, width, height, scale, measured }` plus inline base64 image content — `width`/`height` are the real measured dimensions, `truncated` means it was downscaled (never cropped), and `measured` reports whether the dimensions were decoded
+- **Filename**: the extension comes from `format` — a matching one is kept (`.jpg`/`.jpeg` for jpeg), any other image extension is replaced, and a name without one is appended to. `01-hero.png` with the default `jpeg` format becomes `01-hero.jpg`, not `01-hero.png.jpg`
 - **Errors**: `UNSAFE_PATH` (absolute paths or `..` rejected), `SCREENSHOT_TOO_LARGE`
 - **Limit handling**: a best-effort pre-capture estimate using `deviceScaleFactor`/page scale sets an initial scale; after each capture the real PNG/JPEG header is decoded from the buffer (`decodeImageSize`) and the byte size checked. If either exceeds `MAX_SCREENSHOT_PIXELS`/`MAX_IMAGE_BYTES`, the capture is downscaled via `clip.scale` and retried once (this catches `mobile: true` page-scale inflation the estimate misses)
-- **Full-page details**: scrolls through the page first so lazy/IntersectionObserver sections paint, re-reads layout metrics, temporarily overrides the viewport to the full page height, and restores the previous viewport in a `finally` block (a prior `browser_resize` is preserved, not cleared) — the full page is captured at lower resolution, never cropped
+- **Full-page details**: scrolls through the page first so lazy/IntersectionObserver sections paint, re-reads layout metrics, then captures with a clip spanning the document and `captureBeyondViewport: true`. The viewport is **not** resized to the page height — doing so recalculated the layout against a fake viewport, inflating `100vh` elements and smearing `position: fixed` elements across the image (the classic RTL full-page bug). Oversized pages are downscaled, never cropped
 - **Viewport details**: normally no `clip` is passed to `Page.captureScreenshot`; a clip with `captureBeyondViewport: false` produces a blank frame on scrolled pages. A clip is only added when downscaling is required, together with `captureBeyondViewport: true`
 - **Locked** only when `full_page: true`; viewport shots are read-only
 - **Output**: written to `OUTPUT_DIR` and returned inline
@@ -349,7 +364,7 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ### browser_snapshot
 
 - **Params**: `include_text` (boolean, default true), `max_items` (≤ 200, default 100)
-- **Returns**: `{ elements, count, truncated }` — each element carries `role`, `name`, `description`, a best-effort CSS `selector`, and `state` flags (`checked`, `expanded`, `disabled`, `selected`, `readonly`, `required`)
+- **Returns**: `{ elements, count, truncated, evaluateEnabled }` — each element carries `role`, `name`, `description`, a best-effort CSS `selector`, and `state` flags (`checked`, `expanded`, `disabled`, `selected`, `readonly`, `required`); `evaluateEnabled` tells you whether `browser_evaluate` is usable in this server
 - **Behavior**: walks the accessibility tree for interactive roles, resolves selectors via `DOM.describeNode` with a `Runtime.evaluate` fallback, and returns selectors ready to pass to the interaction tools
 
 ### browser_click
@@ -379,17 +394,17 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ### browser_scroll
 
 - **Params** (exactly one mode required): `direction` (`up`|`down`|`left`|`right`|`top`|`bottom`), `selector`, `x`/`y`, or `pixels`
-- **Returns**: `{ scrollX, scrollY, mode, ... }`
-- **Behavior**: Mode A scrolls by direction (~80% of the viewport dimension, or an exact `pixels` count); Mode B scrolls a selector into view and verifies it is in the viewport; Mode C scrolls to absolute `x`/`y`. All modes use `behavior: 'instant'` and wait ~100 ms + double-rAF before returning, so a screenshot in the next tool call is reliable
-- **Errors**: `INVALID_ARGS` (no mode, conflicting modes, or `x` without `y`), `ELEMENT_NOT_FOUND` (selector mode)
+- **Returns**: `{ scrollX, scrollY, mode, ... }`; element mode adds `inViewport` (any part visible) and `fullyInViewport` (all of it fits)
+- **Behavior**: Mode A scrolls by direction (~80% of the viewport dimension, or an exact `pixels` count); Mode B scrolls a selector into view and reports its visibility; Mode C scrolls to absolute `x`/`y`. A single axis may be given — `{ "y": 600 }` scrolls vertically and **keeps** the current horizontal offset, so the omitted axis is not reset to 0. All modes use `behavior: 'instant'` and wait ~100 ms + double-rAF before returning, so a screenshot in the next tool call is reliable. `inViewport` means partially visible; use `fullyInViewport` when an element taller than the viewport must not count
+- **Errors**: `INVALID_ARGS` (no mode, or conflicting modes), `ELEMENT_NOT_FOUND` (selector mode)
 - **Locked**: no (viewport state, not DOM state)
 
 ### browser_resize
 
 - **Params** (exactly one mode required): `preset` (`mobile`|`tablet`|`desktop`), `width`+`height` (100–10000), or `reset: true`; optional `device_scale_factor` (1–4) and `mobile` overrides; optional `timeout_ms`
-- **Returns**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset }`
+- **Returns**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset, measured, warning? }` — `width`/`height` echo what you requested; `measured` carries what the page actually has (`innerWidth`, `innerHeight`, `devicePixelRatio`, `scrollX`, `scrollWidth`), and `warning` appears when `innerWidth` differs from the requested width (horizontal overflow, or mobile shrink-to-fit)
 - **Presets**: mobile `390×844 @3 mobile`, tablet `768×1024 @2 mobile`, desktop `1280×800 @1`
-- **Behavior**: validation runs on the raw arguments (not Zod-normalized), so `reset` and an empty call are distinguishable. The override is stored on the browser object, survives navigation and idle shutdown, is re-applied after a crash restart, and is **restored** (not cleared) after a `full_page` screenshot. Settles with a double-rAF after applying
+- **Behavior**: validation runs on the raw arguments (not Zod-normalized), so `reset` and an empty call are distinguishable. The override is stored on the browser object, survives navigation and idle shutdown, and is re-applied after a crash restart. Settles with a double-rAF after applying. The requested values are never presented as if they were measured — read `measured` before trusting the layout
 - **Errors**: `INVALID_ARGS` (no mode, conflicting modes, width without height, reset combined with other options), `VIEWPORT_APPLY_FAILED`
 - **Locked**
 
@@ -475,7 +490,7 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ## Testing and Quality
 
 ```bash
-# Run the full suite (258 tests across 22 files)
+# Run the full suite (268 tests across 22 files)
 npm test
 
 # Run a single test file
@@ -490,8 +505,8 @@ node --test --test-concurrency=1 tests/resize.test.js
 Coverage spans:
 
 - **Unit**: URL/path validation, truncation and limits, viewport argument resolution, key resolution/modifier bitmasks, image-size decoding, eval gate, CDP request/response correlation, operation-lock behavior, in-page helper security
-- **Browser lifecycle**: launch, crash + restart, WebSocket reconnect, lazy start, idle shutdown, cleanup with no leaked processes
-- **Tool integration**: reading tools, interaction tools (click/type/wait_for/scroll), resize (presets, persistence, full-page survival), evaluate (gate, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot limit enforcement, parallel instances and lock serialization
+- **Browser lifecycle**: launch, crash + restart (profile reused, contents preserved, `sessionReset` reported once), WebSocket reconnect, lazy start, idle shutdown, cleanup with no leaked processes and orphan reaping
+- **Tool integration**: reading tools (incl. `get_url` across a hash navigation), interaction tools (click/type/wait_for/scroll), scroll semantics (single-axis, `inViewport` vs `fullyInViewport`), resize (presets, measured values + overflow warning, persistence, full-page survival), evaluate (gate advertised in snapshot, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot filename resolution and limit enforcement, full-page completeness on lazy/RTL/tall pages, parallel instances and lock serialization
 - **Security**: injection resistance and absence of sensitive logging
 
 Integration tests spawn real Chromium, so they require Chromium to be installed (see [Install Chromium](#install-chromium)). `--test-concurrency=3` keeps concurrent Chromium instances bounded on low-RAM devices (5.5 GB in testing); raise it on beefier hardware. On very small devices, `memory.test.js` (50 start/stop cycles) is the heaviest file — run it alone and last.
@@ -535,6 +550,10 @@ Measured on aarch64 / Ubuntu 26.04 (server process RSS, `VmRSS`):
 | No console output from the server | All logs go to stderr | Capture it (`2> server.log`) or enable stderr in your MCP client |
 | Typing doesn't trigger app handlers | Framework ignores native events | The server dispatches `input`/`change` via the native value setter; frameworks that bypass native events may need their own listeners |
 | Blank page after hash navigation | Same-document navigation has no load event | The handler settles ~200 ms + double-rAF; give it a beat before the next screenshot |
+| Page went blank and state is gone | Chromium crashed and restarted (profile kept, but the page returns to `about:blank`) | Look for the `sessionReset: true` content item on the first result after the restart, then re-navigate |
+| First capture shows the mobile layout | Chromium's default window (`780×437`) is narrower than common breakpoints | Call `browser_resize` with `preset: "desktop"` (or an explicit size) before capturing. The default is kept small on purpose — a desktop-sized default makes software-rendered captures *far* slower |
+| `browser_resize` width does not match the layout | The document overflows the requested width, or mobile emulation shrank it to fit | Read the `measured` object and the `warning` field instead of the echoed `width` |
+| Vertical scroll reset the horizontal position | You passed `x` explicitly | Pass only `y` — an omitted axis keeps its current position |
 | Blank middle sections in a full-page shot | Lazy/IntersectionObserver content not painted | Use `full_page: true` (warm-up scroll runs automatically); add `delay_ms` for heavy animation |
 | Blank viewport screenshot on a scrolled page | An explicit `clip` on a scrolled page | Handled internally — viewport captures pass no `clip`; update if you patched that code |
 | Verify Chromium works | — | `chromium --headless --no-sandbox --dump-dom about:blank` |

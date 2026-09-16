@@ -481,7 +481,13 @@ describe('Full-page screenshot completeness (Phase 2)', () => {
     serverProc = spawn('node', ['index.js'], {
       cwd: '/root/browser-mcp',
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, OUTPUT_DIR: '/tmp/phase2-shots', IDLE_SHUTDOWN_MS: '0' }
+      env: {
+        ...process.env,
+        OUTPUT_DIR: '/tmp/phase2-shots',
+        IDLE_SHUTDOWN_MS: '0',
+        // The RTL test reads the page's own viewport measurements.
+        ENABLE_EVAL_JS: '1'
+      }
     });
     let stdoutBuffer = '';
     const pending = new Map();
@@ -608,7 +614,7 @@ describe('Full-page screenshot completeness (Phase 2)', () => {
       `bottom should be blue (full page captured), got ${JSON.stringify(bottom)}`);
   });
 
-  it('resets the emulation override after a full-page screenshot', async () => {
+  it('leaves the viewport unchanged after a full-page screenshot', async () => {
     await startServer();
     await init(serverProc);
 
@@ -616,7 +622,6 @@ describe('Full-page screenshot completeness (Phase 2)', () => {
       url: `http://127.0.0.1:${fullPageFixturePort}/tall-page.html`
     });
 
-    // Full-page capture sets a device metrics override internally.
     const full = await call(serverProc, 'browser_screenshot', {
       filename: 'tall-full.png', format: 'png', full_page: true
     });
@@ -630,9 +635,50 @@ describe('Full-page screenshot completeness (Phase 2)', () => {
     assert.notEqual(view.result.isError, true);
 
     const png = decodePng(Buffer.from(view.result.content[1].data, 'base64'));
-    assert.ok(png.width < 2000, `emulation leaked: viewport width ${png.width}`);
-    assert.ok(png.height < 2000, `emulation leaked: viewport height ${png.height}`);
+    assert.ok(png.width < 2000, `viewport width leaked from the capture: ${png.width}`);
+    assert.ok(png.height < 2000, `viewport height leaked from the capture: ${png.height}`);
     assert.ok(png.height < 1500, `expected a viewport-height image, got ${png.height}`);
+  });
+
+  it('captures an RTL page without inflating the viewport', async () => {
+    await startServer();
+    await init(serverProc);
+
+    const nav = await call(serverProc, 'browser_navigate', {
+      url: `http://127.0.0.1:${fullPageFixturePort}/rtl-page.html`
+    });
+    assert.notEqual(nav.result.isError, true);
+
+    await call(serverProc, 'browser_resize', { width: 1440, height: 900 });
+    await call(serverProc, 'browser_scroll', { direction: 'top' });
+
+    const shot = await call(serverProc, 'browser_screenshot', {
+      filename: 'rtl-full.png', format: 'png', full_page: true
+    });
+    assert.notEqual(shot.result.isError, true,
+      `full-page screenshot failed: ${shot.result?.content?.[0]?.text}`);
+
+    const png = decodePng(Buffer.from(shot.result.content[1].data, 'base64'));
+
+    // The 100vh hero (900px) plus the 2000px content column.
+    assert.ok(png.height > 2500, `expected the whole document, got ${png.height}px tall`);
+
+    // The middle of the page must show the content column, not the hero. When
+    // the viewport is inflated to the document height, 100vh fills the entire
+    // image with the hero colour — the distortion this test guards against.
+    const mid = avgColor(png, 1400, 1600);
+    assert.ok(mid.r < 100, `mid-band shows a stretched 100vh hero: ${JSON.stringify(mid)}`);
+    assert.ok(mid.g > 120, `mid-band should be the content column: ${JSON.stringify(mid)}`);
+
+    // The capture must not resize the viewport: the height:100% fixed sidebar
+    // would otherwise stretch to the document height, smearing over the image.
+    const measured = await call(serverProc, 'browser_evaluate', {
+      expression: '({ maxInner: window.__maxInnerHeight, maxSidebar: window.__maxSidebarHeight })'
+    });
+    assert.notEqual(measured.result.isError, true);
+    const { maxInner, maxSidebar } = JSON.parse(measured.result.content[0].text).result;
+    assert.ok(maxInner <= 901, `viewport was inflated during the capture: ${maxInner}px`);
+    assert.ok(maxSidebar <= 901, `fixed sidebar stretched to ${maxSidebar}px`);
   });
 });
 

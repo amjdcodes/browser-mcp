@@ -220,4 +220,27 @@ describe('Cleanup', () => {
     assert.equal(browser.cdp, cdpAfterFirst);
     assert.equal(browser.state, 'stopped');
   });
+
+  // Regression: _killChildrenByProfile silently did nothing because
+  // readdirSync was never imported — the ReferenceError was swallowed by its
+  // catch-all. Without this test the profile-orphan reaping is untested.
+  it('kills the orphaned children that still reference the profile dir', async () => {
+    const { Browser } = await import('../src/browser.js');
+    const browser = new Browser();
+    const profileMarker = `browser-mcp-profile-${process.pid}-${Date.now()}`;
+
+    // Stand-in for a Chromium child: --user-data-dir=<profile> keeps the
+    // profile path in the cmdline, which is exactly what the scan looks for.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', profileMarker], {
+      stdio: 'ignore'
+    });
+    await sleep(500);
+    assert.equal(pidAlive(child.pid), true, 'stand-in child should be running');
+
+    browser._killChildrenByProfile(profileMarker);
+    await sleep(300);
+
+    assert.equal(pidAlive(child.pid), false, 'child referencing the profile must be killed');
+    child.kill('SIGKILL'); // no-op when already reaped
+  });
 });

@@ -1,7 +1,15 @@
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, after, afterEach, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Browser } from '../src/browser.js';
+import {
+  startFixtureServer,
+  startMcpServer,
+  stopServer,
+  initializeServer,
+  makeCallTool
+} from './harness.js';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -44,7 +52,7 @@ describe('Chromium crash / restart', () => {
     }
   });
 
-  it('restarts with a new process, profile, port, and WebSocket after a crash', async () => {
+  it('restarts with a new process and WebSocket after a crash', async () => {
     browser = new Browser();
     await browser.start();
     assert.equal(browser.state, 'ready');
@@ -59,22 +67,25 @@ describe('Chromium crash / restart', () => {
 
     await waitForRestart(browser);
 
-    // New process, profile, and port — a completely fresh browser.
+    // New process, port and WebSocket — but the SAME profile directory, so the
+    // page's stored state (localStorage, session storage, cookies) survives.
     assert.notEqual(browser.pid, oldPid, 'a new Chromium process should be spawned');
     assert.ok(browser.pid > 0);
     assert.notEqual(browser.port, oldPort, 'a new CDP port should be allocated');
-    assert.notEqual(browser.profileDir, oldProfile, 'a new profile directory should be created');
-    assert.ok(existsSync(browser.profileDir), 'new profile should exist on disk');
+    assert.equal(browser.profileDir, oldProfile, 'the profile directory must be reused');
+    assert.ok(existsSync(browser.profileDir), 'the profile should still exist on disk');
 
-    // Old resources cleaned up.
+    // Old process cleaned up.
     assert.equal(isProcessAlive(oldPid), false, 'old Chromium process should be dead');
-    assert.equal(existsSync(oldProfile), false, 'old profile directory should be removed');
     assert.notEqual(browser.cdp, oldCdp, 'a new CDP client/WebSocket should be created');
     assert.equal(browser.isReady, true);
     assert.ok(browser.cdp.isConnected, 'new WebSocket should be connected');
 
-    // The page is fresh about:blank — the old page state is NOT restored and
-    // the interrupted navigation is NOT retried.
+    // The client is told once that the session was reset.
+    assert.equal(browser.consumeSessionReset(), true, 'the reset must be reported');
+    assert.equal(browser.consumeSessionReset(), false, 'the reset is reported only once');
+
+    // The page is fresh about:blank — the interrupted navigation is NOT retried.
     const result = await browser.send('Runtime.evaluate', {
       expression: 'document.title',
       returnByValue: true
@@ -95,17 +106,22 @@ describe('Chromium crash / restart', () => {
     assert.equal(browser.isReady, true);
   });
 
-  it('cleans up the old profile and creates a fresh one', async () => {
+  it('keeps the profile directory, and its contents, across a restart', async () => {
     browser = new Browser();
     await browser.start();
-    const oldProfile = browser.profileDir;
-    assert.ok(existsSync(oldProfile));
+    const profile = browser.profileDir;
+    assert.ok(existsSync(profile));
+
+    // Stands in for the browser's own on-disk state (localStorage leveldb,
+    // cookies): it must outlive the crash restart.
+    const marker = join(profile, 'state-marker');
+    writeFileSync(marker, 'kept');
 
     process.kill(browser.pid, 'SIGKILL');
     await waitForRestart(browser);
 
-    assert.equal(existsSync(oldProfile), false, 'old profile must be removed after restart');
-    assert.notEqual(browser.profileDir, oldProfile);
+    assert.equal(browser.profileDir, profile, 'the same profile must be reused');
+    assert.ok(existsSync(marker), 'the profile contents must survive the restart');
   });
 
   it('re-enables CDP domains after restart', async () => {
@@ -180,5 +196,60 @@ describe('Chromium crash / restart', () => {
       /Timeout: Runtime.evaluate/
     );
     assert.ok(Date.now() - started < 10000, 'timeout should be enforced');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The MCP layer must tell the client that a crash wiped the page, instead of
+// letting it draw conclusions from a page it never saw reset.
+// ---------------------------------------------------------------------------
+
+describe('Crash restart reporting', () => {
+  let fixture;
+  let state;
+  let call;
+
+  before(async () => {
+    fixture = await startFixtureServer();
+    state = startMcpServer();
+    await initializeServer(state, 'restart-report-test');
+    call = makeCallTool(state);
+    await call('browser_navigate', { url: `http://127.0.0.1:${fixture.port}/` });
+  });
+
+  after(async () => {
+    await stopServer(state);
+    fixture.server.close();
+  });
+
+  function sessionResetNotes(response) {
+    return (response.result.content || [])
+      .filter(part => typeof part.text === 'string')
+      .map(part => part.text)
+      .filter(text => text.includes('sessionReset'));
+  }
+
+  it('reports the reset once, on the first call after the crash', async () => {
+    const pid = parseInt(state.stderr.match(/Chromium PID: (\d+)/)[1], 10);
+    const readyCount = () => (state.stderr.match(/\[Browser\] Ready on port/g) || []).length;
+
+    const readyBefore = readyCount();
+    process.kill(pid, 'SIGKILL');
+
+    const deadline = Date.now() + 60000;
+    while (readyCount() === readyBefore && Date.now() < deadline) {
+      await sleep(100);
+    }
+    assert.ok(readyCount() > readyBefore, 'the browser never came back after the crash');
+
+    // The first call after the restart is the one that must report the reset.
+    const afterCrash = await call('browser_get_url', {}, 60000);
+    assert.notEqual(afterCrash.result.isError, true);
+    assert.equal(sessionResetNotes(afterCrash).length, 1, 'the reset must be reported');
+    assert.equal(JSON.parse(afterCrash.result.content[0].text).url, 'about:blank',
+      'the restarted browser is on about:blank');
+
+    const next = await call('browser_get_url', {});
+    assert.equal(sessionResetNotes(next).length, 0, 'the reset must not be reported twice');
   });
 });

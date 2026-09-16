@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>صفحة عربية RTL</title>
+    <style>
+        html, body { margin: 0; padding: 0; }
+        /* Blue page background: any of it left uncovered in a full-page capture
+           means the layout stopped filling the width. */
+        body { background: rgb(0, 128, 255); }
+
+        /* A fixed, full-height sidebar — the element that smears across the
+           whole image when the viewport is resized to the document height. */
+        #rtl-sidebar {
+            position: fixed;
+            top: 0;
+            bottom: 0;
+            right: 0;
+            width: 200px;
+            height: 100%;
+            background: rgb(255, 0, 0);
+        }
+
+        /* 100vh hero: yellow. It is exactly one viewport tall only if the
+           capture does NOT inflate the viewport to the document height — an
+           inflated viewport turns the whole middle of the image yellow. */
+        #rtl-hero {
+            height: 100vh;
+            background: rgb(255, 220, 0);
+        }
+
+        #rtl-content {
+            margin-right: 200px;
+            height: 2000px;
+            background: rgb(0, 200, 0);
+        }
+    </style>
+</head>
+<body>
+    <div id="rtl-sidebar">القائمة الجانبية</div>
+    <div id="rtl-hero">بانر الصفحة</div>
+    <div id="rtl-content">محتوى الصفحة</div>
+    <script>
+        // Records the largest viewport and fixed-sidebar heights ever seen. A
+        // full-page capture that resizes the viewport to the document height
+        // makes the height:100% sidebar stretch far below the viewport — the
+        // RTL distortion signature.
+        window.__maxInnerHeight = window.innerHeight;
+        window.__maxSidebarHeight = 0;
+
+        function sample() {
+            window.__maxInnerHeight = Math.max(window.__maxInnerHeight, window.innerHeight);
+            window.__maxSidebarHeight = Math.max(
+                window.__maxSidebarHeight,
+                document.getElementById('rtl-sidebar').getBoundingClientRect().height
+            );
+        }
+
+        window.addEventListener('resize', sample);
+        sample();
+    </script>
+</body>
+</html>

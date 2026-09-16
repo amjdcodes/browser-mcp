@@ -35,7 +35,7 @@ import { join } from 'node:path';
 
 const server = new McpServer({
   name: 'browser-mcp',
-  version: '1.0.0'
+  version: '1.5.0'
 }, {
   capabilities: {
     tools: {}
@@ -58,7 +58,25 @@ function withActivityTracking(handler) {
     // Any request counts as activity: extend the idle window from its start.
     resetIdleTimer();
     try {
-      return await handler(args);
+      const result = await handler(args);
+
+      // After a crash restart the page is back on about:blank with its scroll
+      // position and DOM gone. Say so on the first successful call afterwards,
+      // instead of letting the client draw conclusions from a blank page it
+      // never saw reset. Error results do not consume the flag — they may
+      // predate the restart finishing.
+      if (result && result.isError !== true && browser.consumeSessionReset() &&
+          Array.isArray(result.content)) {
+        result.content.push({
+          type: 'text',
+          text: JSON.stringify({
+            sessionReset: true,
+            reason: 'Chromium restarted after a crash; the page and its in-memory state were reset.'
+          })
+        });
+      }
+
+      return result;
     } finally {
       activeOperations--;
     }
@@ -367,6 +385,43 @@ registerTool(
 );
 
 registerTool(
+  'browser_get_url',
+  'Get the current page URL, title, and document ready state',
+  {},
+  async () => {
+    try {
+      await ensureBrowserReady();
+
+      // Wait for any in-flight navigation to complete
+      if (navigationPromise) {
+        await navigationPromise.catch(() => {});
+      }
+
+      process.stderr.write('[MCP] Getting current URL\n');
+
+      const result = await browser.send('Runtime.evaluate', {
+        expression: `({
+          url: window.location.href,
+          title: document.title,
+          readyState: document.readyState
+        })`,
+        returnByValue: true
+      }, 5000);
+
+      resetIdleTimer();
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result.result.value) }]
+      };
+
+    } catch (err) {
+      process.stderr.write(`[MCP] Get URL error: ${err.message}\n`);
+      return formatToolError(err);
+    }
+  }
+);
+
+registerTool(
   'browser_get_text',
   'Get text content from the page or a specific element',
   {
@@ -459,6 +514,11 @@ registerTool(
 const OUTPUT_DIR = process.env.OUTPUT_DIR || './screenshots';
 const MAX_SCREENSHOT_PIXELS = CONFIG.MAX_SCREENSHOT_PIXELS;
 
+// Image extensions the screenshot filename resolver recognises. A name already
+// carrying one of these has it REPLACED by the requested format's extension —
+// appending blindly produced double extensions like "01-hero.png.jpg".
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
+
 // ALLOW_PRIVATE_NETWORKS=1|true allows navigation to private IP ranges.
 function isPrivateNetworksAllowed() {
   const v = (process.env.ALLOW_PRIVATE_NETWORKS || '').toLowerCase();
@@ -528,17 +588,23 @@ registerTool(
           await navigationPromise.catch(() => {});
         }
 
-        const JPEG_EXTENSIONS = ['.jpg', '.jpeg'];
-        const PNG_EXTENSIONS = ['.png'];
-
         if (!filename) {
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
           filename = `screenshot-${timestamp}.${format}`;
         } else {
-          const ext = format === 'jpeg' ? JPEG_EXTENSIONS : PNG_EXTENSIONS;
-          const hasExt = ext.some(e => filename.toLowerCase().endsWith(e));
-          if (!hasExt) {
-            filename = `${filename}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+          // The extension is decided by `format`: a matching extension is kept
+          // (".jpg" and ".jpeg" both match jpeg), any other image extension is
+          // replaced, and a name without one gets the format's extension.
+          const matchingExtensions = format === 'jpeg' ? ['.jpg', '.jpeg'] : ['.png'];
+          const targetExtension = format === 'jpeg' ? '.jpg' : '.png';
+          const lowerName = filename.toLowerCase();
+
+          if (!matchingExtensions.some(ext => lowerName.endsWith(ext))) {
+            const existingExtension = IMAGE_EXTENSIONS.find(ext => lowerName.endsWith(ext));
+            const baseName = existingExtension
+              ? filename.slice(0, -existingExtension.length)
+              : filename;
+            filename = `${baseName}${targetExtension}`;
           }
         }
 
@@ -639,117 +705,96 @@ registerTool(
           await new Promise(resolve => setTimeout(resolve, delay_ms));
         }
 
-        // For full-page captures, temporarily set the viewport height to the full
-        // page height so CSS layout computations (grid/flex/100vh) resolve
-        // correctly. ALWAYS restore the previous state afterwards, even on
-        // failure — never leave a browser_resize override cleared.
-        const previousViewport = browser.viewport;
-        let emulationSet = false;
-        try {
-          if (full_page) {
-            await browser.send('Emulation.setDeviceMetricsOverride', {
-              width: visualViewport.clientWidth,
-              height: Math.max(fullPageClip.height, visualViewport.clientHeight),
-              deviceScaleFactor: 1,
-              mobile: false
-            }, 5000);
-            emulationSet = true;
-            await new Promise(resolve => setTimeout(resolve, 200));
+        // Full-page captures rely on `captureBeyondViewport` with a clip spanning
+        // the whole document — the viewport is deliberately NOT resized to the
+        // page height. Doing that recomputed the layout against a fake viewport
+        // (100vh elements inflated, `position: fixed` elements stretched over the
+        // whole image), which visibly broke RTL pages.
+
+        // --- Layer 2: capture, measure the real image, correct if needed --
+        const MAX_CAPTURE_ATTEMPTS = 2;
+        let finalResult = null;
+        let finalBuffer = null;
+        let finalDims = null;
+        let finalScale = scale;
+        let lastBuffer = null;
+        let lastDims = null;
+
+        for (let attempt = 0; attempt < MAX_CAPTURE_ATTEMPTS; attempt++) {
+          const result = await browser.send(
+            'Page.captureScreenshot',
+            buildCaptureParams(scale),
+            30000
+          );
+          const buffer = Buffer.from(result.data, 'base64');
+          const dims = decodeImageSize(buffer, format);
+
+          const overPixels =
+            dims !== null && dims.width * dims.height > MAX_SCREENSHOT_PIXELS;
+          const overBytes = buffer.length > CONFIG.MAX_IMAGE_BYTES;
+
+          if (!overPixels && !overBytes) {
+            finalResult = result;
+            finalBuffer = buffer;
+            finalDims = dims;
+            finalScale = scale;
+            break;
           }
 
-          // --- Layer 2: capture, measure the real image, correct if needed --
-          const MAX_CAPTURE_ATTEMPTS = 2;
-          let finalResult = null;
-          let finalBuffer = null;
-          let finalDims = null;
-          let finalScale = scale;
-          let lastBuffer = null;
-          let lastDims = null;
+          const fPix = overPixels
+            ? Math.sqrt(MAX_SCREENSHOT_PIXELS / (dims.width * dims.height))
+            : 1;
+          const fByte = overBytes
+            ? Math.sqrt(CONFIG.MAX_IMAGE_BYTES / buffer.length)
+            : 1;
+          const correction = Math.min(fPix, fByte) * 0.98;
 
-          for (let attempt = 0; attempt < MAX_CAPTURE_ATTEMPTS; attempt++) {
-            const result = await browser.send(
-              'Page.captureScreenshot',
-              buildCaptureParams(scale),
-              30000
-            );
-            const buffer = Buffer.from(result.data, 'base64');
-            const dims = decodeImageSize(buffer, format);
+          process.stderr.write(
+            `[MCP] Screenshot over limit (px=${dims ? `${dims.width}x${dims.height}` : 'unknown'}, ` +
+            `bytes=${buffer.length}); re-capturing scale=${((scale || 1) * correction).toFixed(3)}\n`
+          );
 
-            const overPixels =
-              dims !== null && dims.width * dims.height > MAX_SCREENSHOT_PIXELS;
-            const overBytes = buffer.length > CONFIG.MAX_IMAGE_BYTES;
-
-            if (!overPixels && !overBytes) {
-              finalResult = result;
-              finalBuffer = buffer;
-              finalDims = dims;
-              finalScale = scale;
-              break;
-            }
-
-            const fPix = overPixels
-              ? Math.sqrt(MAX_SCREENSHOT_PIXELS / (dims.width * dims.height))
-              : 1;
-            const fByte = overBytes
-              ? Math.sqrt(CONFIG.MAX_IMAGE_BYTES / buffer.length)
-              : 1;
-            const correction = Math.min(fPix, fByte) * 0.98;
-
-            process.stderr.write(
-              `[MCP] Screenshot over limit (px=${dims ? `${dims.width}x${dims.height}` : 'unknown'}, ` +
-              `bytes=${buffer.length}); re-capturing scale=${((scale || 1) * correction).toFixed(3)}\n`
-            );
-
-            lastBuffer = buffer;
-            lastDims = dims;
-            scale = (scale || 1) * correction;
-            truncated = true;
-          }
-
-          if (!finalResult) {
-            return formatToolError(toolError(
-              ERRORS.SCREENSHOT_TOO_LARGE,
-              `Screenshot still exceeds limits after ${MAX_CAPTURE_ATTEMPTS} attempts ` +
-              `(px=${lastDims ? `${lastDims.width}x${lastDims.height}` : 'unknown'}, ` +
-              `bytes=${lastBuffer ? lastBuffer.length : 'unknown'}). ` +
-              'Use a smaller viewport or lower quality.'
-            ));
-          }
-
-          await writeFile(pathValidation.path, finalBuffer);
-          resetIdleTimer();
-
-          const meta = {
-            path: pathValidation.path,
-            size: finalBuffer.length,
-            truncated,
-            scale: finalScale,
-            measured: finalDims !== null
-          };
-          if (finalDims) {
-            meta.width = finalDims.width;
-            meta.height = finalDims.height;
-          }
-
-          return {
-            content: [
-              { type: 'text', text: JSON.stringify(meta) },
-              {
-                type: 'image',
-                data: finalResult.data,
-                mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png'
-              }
-            ]
-          };
-        } finally {
-          if (emulationSet) {
-            if (previousViewport) {
-              await browser.applyViewport(previousViewport).catch(() => {});
-            } else {
-              await browser.send('Emulation.clearDeviceMetricsOverride', {}, 5000).catch(() => {});
-            }
-          }
+          lastBuffer = buffer;
+          lastDims = dims;
+          scale = (scale || 1) * correction;
+          truncated = true;
         }
+
+        if (!finalResult) {
+          return formatToolError(toolError(
+            ERRORS.SCREENSHOT_TOO_LARGE,
+            `Screenshot still exceeds limits after ${MAX_CAPTURE_ATTEMPTS} attempts ` +
+            `(px=${lastDims ? `${lastDims.width}x${lastDims.height}` : 'unknown'}, ` +
+            `bytes=${lastBuffer ? lastBuffer.length : 'unknown'}). ` +
+            'Use a smaller viewport or lower quality.'
+          ));
+        }
+
+        await writeFile(pathValidation.path, finalBuffer);
+        resetIdleTimer();
+
+        const meta = {
+          path: pathValidation.path,
+          size: finalBuffer.length,
+          truncated,
+          scale: finalScale,
+          measured: finalDims !== null
+        };
+        if (finalDims) {
+          meta.width = finalDims.width;
+          meta.height = finalDims.height;
+        }
+
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify(meta) },
+            {
+              type: 'image',
+              data: finalResult.data,
+              mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png'
+            }
+          ]
+        };
 
       } catch (err) {
         process.stderr.write(`[MCP] Screenshot error: ${err.message}\n`);
@@ -969,7 +1014,10 @@ registerTool(
           text: JSON.stringify({
             elements: interactiveElements,
             count: interactiveElements.length,
-            truncated: interactiveElements.length >= max_items
+            truncated: interactiveElements.length >= max_items,
+            // Snapshot is the discovery tool: advertise whether browser_evaluate
+            // is usable here, instead of letting the caller find out by failing.
+            evaluateEnabled: isEvalJsEnabled()
           })
         }]
       };
@@ -1152,14 +1200,8 @@ registerTool(
           'Provide exactly one of "direction", "selector", or x/y coordinates'
         ));
       }
-      if (hasPosition && (x === undefined || y === undefined)) {
-        return formatToolError(toolError(
-          'INVALID_ARGS',
-          'Both x and y must be provided for coordinate scrolling'
-        ));
-      }
 
-      process.stderr.write(`[MCP] Scrolling: ${hasSelector ? `to element ${selector}` : hasDirection ? `by direction ${direction}${pixels !== undefined ? ` (${pixels}px)` : ''}` : `to (${x}, ${y})`}\n`);
+      process.stderr.write(`[MCP] Scrolling: ${hasSelector ? `to element ${selector}` : hasDirection ? `by direction ${direction}${pixels !== undefined ? ` (${pixels}px)` : ''}` : `to (${x ?? 'current'}, ${y ?? 'current'})`}\n`);
 
       let result;
       if (hasSelector) {
@@ -1173,7 +1215,8 @@ registerTool(
               scrollY: result.scrollY,
               mode: 'element',
               selector,
-              inViewport: result.inViewport
+              inViewport: result.inViewport,
+              fullyInViewport: result.fullyInViewport
             })
           }]
         };
@@ -1204,8 +1247,8 @@ registerTool(
             scrollX: result.scrollX,
             scrollY: result.scrollY,
             mode: 'position',
-            x,
-            y
+            x: x ?? null,
+            y: y ?? null
           })
         }]
       };
@@ -1216,6 +1259,26 @@ registerTool(
     }
   }
 );
+
+/**
+ * Read the viewport the page actually has. `browser_resize` echoes back the
+ * values it was asked for; these are the measured ones, which differ when the
+ * document overflows the requested width (Chromium then shrinks the layout to
+ * fit) or when mobile emulation applies a page scale.
+ */
+async function measureViewport(browser) {
+  const result = await browser.send('Runtime.evaluate', {
+    expression: `({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      scrollX: window.scrollX,
+      scrollWidth: document.documentElement.scrollWidth
+    })`,
+    returnByValue: true
+  }, 5000);
+  return result.result.value ?? null;
+}
 
 registerTool(
   'browser_resize',
@@ -1251,6 +1314,7 @@ registerTool(
           process.stderr.write('[MCP] Resetting viewport override\n');
           await browser.clearViewport();
           await waitForSettle(browser).catch(() => {});
+          const measured = await measureViewport(browser).catch(() => null);
           resetIdleTimer();
           return {
             content: [{
@@ -1262,7 +1326,8 @@ registerTool(
                 deviceScaleFactor: null,
                 mobile: null,
                 preset: null,
-                reset: true
+                reset: true,
+                measured
               })
             }]
           };
@@ -1285,21 +1350,32 @@ registerTool(
         }
 
         await waitForSettle(browser).catch(() => {});
+        const measured = await measureViewport(browser).catch(() => null);
         resetIdleTimer();
 
+        const response = {
+          resized: true,
+          width: viewport.width,
+          height: viewport.height,
+          deviceScaleFactor: viewport.deviceScaleFactor,
+          mobile: viewport.mobile,
+          preset: preset ?? null,
+          reset: false,
+          measured
+        };
+
+        // The echoed width is what was requested; a mismatch means the page did
+        // not accept it (horizontal overflow, or shrink-to-fit under mobile
+        // emulation). Say so instead of implying the values matched.
+        if (measured && measured.innerWidth !== viewport.width) {
+          response.warning =
+            `Requested width ${viewport.width}px but the page reports ` +
+            `innerWidth=${measured.innerWidth}px — the document overflows the ` +
+            'viewport or is scaled to fit.';
+        }
+
         return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              resized: true,
-              width: viewport.width,
-              height: viewport.height,
-              deviceScaleFactor: viewport.deviceScaleFactor,
-              mobile: viewport.mobile,
-              preset: preset ?? null,
-              reset: false
-            })
-          }]
+          content: [{ type: 'text', text: JSON.stringify(response) }]
         };
 
       } catch (err) {
@@ -1324,7 +1400,10 @@ registerTool(
     if (!isEvalJsEnabled()) {
       return formatToolError(toolError(
         ERRORS.EVAL_DISABLED,
-        'browser_evaluate is disabled. Set ENABLE_EVAL_JS=1 in the MCP server environment to enable it.'
+        'browser_evaluate is disabled by default: it runs arbitrary page ' +
+        'JavaScript, which can read document.cookie/localStorage and reach ' +
+        'internal networks via fetch() (SSRF). Set ENABLE_EVAL_JS=1 in the MCP ' +
+        'server environment to enable it for pages you trust.'
       ));
     }
 

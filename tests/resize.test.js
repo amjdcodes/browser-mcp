@@ -92,9 +92,38 @@ describe('browser_resize', () => {
     assertSuccess(await call('browser_resize', { width: 500, height: 700 }));
     const res = assertSuccess(await call('browser_resize', { reset: true }));
     assert.equal(res.reset, true);
+    assert.ok(res.measured, 'reset reports the measured viewport too');
 
     const dims = await dimensions();
     assert.notEqual(dims.iw, 500);
+  });
+
+  it('reports the measured viewport alongside the requested one', async () => {
+    const res = assertSuccess(await call('browser_resize', { width: 500, height: 700 }));
+    assert.equal(res.width, 500, 'the requested width is echoed');
+    assert.equal(res.measured.innerWidth, 500, 'the measured width is reported separately');
+    assert.equal(res.measured.innerHeight, 700);
+    assert.equal(res.warning, undefined, 'no warning when the page accepts the width');
+  });
+
+  it('warns when the page overflows the requested width', async () => {
+    // tall-page.html is 3000px wide, so a 390px mobile viewport cannot hold it.
+    await call('browser_navigate', { url: `http://127.0.0.1:${fixture.port}/tall-page.html` });
+    const res = assertSuccess(await call('browser_resize', { preset: 'mobile' }));
+
+    assert.equal(res.width, 390, 'the requested preset width is echoed');
+    assert.notEqual(res.measured.innerWidth, 390, 'the page did not accept the requested width');
+    assert.match(res.warning, /innerWidth/);
+  });
+
+  it('starts with a small default window so the first capture stays cheap', async () => {
+    // beforeEach reset the emulation override and navigated, so this reads the
+    // raw Chromium window size. It is deliberately NOT a desktop size: adding
+    // --window-size=1440,900 made each software-rendered capture ~5x more
+    // expensive (past 30s) and timed out the suite. Call browser_resize when a
+    // desktop layout is needed. Update this bound only if capture cost improves.
+    const dims = await dimensions();
+    assert.ok(dims.iw <= 1000, `default window width inflated to ${dims.iw}`);
   });
 
   it('keeps the resize across a navigation', async () => {

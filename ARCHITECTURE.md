@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 13 tools for AI assistants to control a browser instance.
+**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 14 tools for AI assistants to control a browser instance.
 
 - **Runtime**: Node.js (ESM modules, `"type": "module"`)
 - **Protocol**: MCP over stdio transport
@@ -25,19 +25,36 @@ browser-mcp/
 │   ├── lock.js                 # Operation lock (mutex + bounded queue)
 │   ├── utils.js                # Validation, truncation, error formatting, image size decode
 │   └── viewport.js             # Viewport presets + raw resize validation
-├── tests/                      # Unit and integration tests (node:test)
-│   ├── browser.test.js         # Browser class tests
-│   ├── cdp.test.js             # CDP client tests
-│   ├── utils.test.js           # Utility function tests
+├── tests/                      # 22 test files (node:test + node:assert/strict)
+│   ├── harness.js              # Shared harness (fixture server, MCP child, buffered JSON-RPC)
+│   ├── utils.test.js           # Validation, truncation, limits, image-size decode, eval gate
+│   ├── viewport.test.js        # Presets + raw resize-argument validation
+│   ├── keymap.test.js          # Key resolution and modifier bitmasks
+│   ├── cdp.test.js             # Request/response correlation, pending cleanup
+│   ├── lock.test.js            # FIFO ordering, queue limit, release-on-error
 │   ├── helpers.test.js         # In-page helper security/unit tests
-│   ├── lock.test.js            # Operation lock behavior tests
-│   ├── integration.test.js     # End-to-end browser tests
+│   ├── browser.test.js         # Browser class tests
+│   ├── cleanup.test.js         # Process/profile cleanup, orphan reaping, no leaks
+│   ├── lazy-start.test.js      # Browser starts only on the first tool call
+│   ├── idle-shutdown.test.js   # Idle timeout behavior
+│   ├── reconnect.test.js       # WebSocket drop → reconnect to the same process
+│   ├── restart.test.js         # Crash → restart, profile preservation, sessionReset
+│   ├── memory.test.js          # Truncation and memory-bound behavior
+│   ├── parallel.test.js        # Concurrent instances and lock serialization
 │   ├── mcp-handshake.test.js   # MCP protocol handshake tests
-│   ├── reading-tools.test.js   # Reading tool functionality tests
-│   └── interaction.test.js     # Click/type/wait_for integration tests
+│   ├── integration.test.js     # End-to-end navigation/reading + full-page pixel checks
+│   ├── reading-tools.test.js   # get_url / get_text / get_console / snapshot / screenshot
+│   ├── interaction.test.js     # click / type / wait_for / scroll
+│   ├── resize.test.js          # resize: explicit/presets/reset, measured values, persistence
+│   ├── evaluate.test.js        # evaluate: gate, primitives, DOM, cycles, promises, errors
+│   ├── hover-press.test.js     # hover and key press (Enter/Tab/Escape/modifiers)
+│   └── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
 ├── fixtures/                   # Test fixtures
 │   ├── test-page.html          # Shared HTML test fixture (interactive)
-│   └── page2.html              # Navigation target for click tests
+│   ├── page2.html              # Navigation target for click tests
+│   ├── lazy-page.html          # IntersectionObserver / lazy rendering
+│   ├── tall-page.html          # 3000x19400 page for full-page downscaling
+│   └── rtl-page.html           # Arabic RTL: fixed sidebar + 100vh hero
 ├── screenshots/                # Screenshot output directory (runtime)
 └── node_modules/               # Dependencies
 ```
@@ -52,7 +69,7 @@ browser-mcp/
 
 **Responsibilities**:
 - Creates MCP server instance with stdio transport
-- Registers 13 tools: `browser_navigate`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`
+- Registers 14 tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`
 - Manages browser lifecycle (lazy initialization on first tool call)
 - Implements idle timeout shutdown (default 5 minutes)
 - Serializes state-changing operations (click/type/navigate/full-page screenshot) via `src/lock.js`
@@ -62,7 +79,7 @@ browser-mcp/
 **Key Functions**:
 - `ensureBrowserReady()` - Lazy browser initialization; waits during reconnect/restart recovery; surfaces `CHROMIUM_RESTART_FAILED` with last stderr on crash-loop
 - `resetIdleTimer()` - Resets idle shutdown timer on each tool call (reschedules while operations are in flight; `IDLE_SHUTDOWN_MS=0` disables)
-- `withActivityTracking(handler)` - Wraps every tool handler; tracks in-flight operations so idle shutdown never interrupts them
+- `withActivityTracking(handler)` - Wraps every tool handler; tracks in-flight operations so idle shutdown never interrupts them, and appends a `{ sessionReset: true, reason }` text content item to the first successful result after a crash restart
 - `runLocked(fn)` - Runs a state-changing operation behind the operation lock
 - `shutdown()` - Graceful cleanup on exit
 
@@ -82,7 +99,7 @@ browser-mcp/
 - Establishes WebSocket connection to page target
 - Enables CDP domains: Page, Runtime, Network, DOM, Accessibility
 - Sets up console message listeners
-- Handles crash recovery (auto-restart up to 2 times)
+- Handles crash recovery (auto-restart up to 2 times, reusing the profile so page state survives)
 - Manages temporary profile directory cleanup
 
 **State Machine**:
@@ -97,16 +114,16 @@ STOPPING → STOPPED
 ```
 
 **Key Methods**:
-- `start()` - Spawns Chromium (own process group, `detached: true`), waits for DevTools port, connects to page
+- `start({ preserveProfile })` - Spawns Chromium (`detached: false`), waits for the DevTools port, connects to the page. With `preserveProfile` it reuses the existing profile dir after clearing the stale `SingletonLock`/`SingletonCookie`/`SingletonSocket`/`DevToolsActivePort` files a killed Chromium leaves behind
 - `send(method, params, timeout)` - Sends CDP command; throws `[CHROMIUM_RESTART_FAILED]` with last stderr when the browser is failed
-- `cleanup()` - Kills the whole Chromium process group, closes WebSocket, removes profile dir (with retry)
-- `_handleCrash()` - Auto-restart on unexpected exit (up to `maxRestartAttempts`)
+- `cleanup({ removeProfile })` - Closes the WebSocket, kills the Chromium process by PID (SIGTERM then SIGKILL), then reaps orphaned children by scanning `/proc` for the profile path before removing the profile dir (with retry). `removeProfile: false` keeps the profile for a crash restart
+- `consumeSessionReset()` - True once after a crash restart, so the next tool result can report it
+- `_handleCrash()` - Auto-restart on unexpected exit (up to `maxRestartAttempts`), preserving the profile
 - `_reconnect()` - Reconnect to the SAME process after a WebSocket drop (exponential backoff, up to `maxReconnectAttempts`)
-- `_handleConnectionLost()` - CDP 'close' → reconnect while the process is alive
 
 **Critical Constants**:
 - `KNOWN_PATHS` - Default Chromium binary locations
-- `DEFAULT_FLAGS` - Headless Chromium launch flags
+- `DEFAULT_FLAGS` - Headless Chromium launch flags. Deliberately contains no `--window-size`: a desktop-sized default made software-rendered captures too slow to be usable
 - `STATES` - Browser state enum
 
 ---
@@ -246,6 +263,10 @@ index.js (MCP Server)
 │   ├── validateURL() → src/utils.js
 │   ├── Browser.send('Page.navigate')
 │   ├── Browser.cdp.on('Page.loadEventFired')
+│   ├── Browser.send('Runtime.evaluate')
+│   └── resetIdleTimer()
+├── Tool: browser_get_url
+│   ├── ensureBrowserReady()
 │   ├── Browser.send('Runtime.evaluate')
 │   └── resetIdleTimer()
 ├── Tool: browser_get_text
@@ -416,10 +437,11 @@ See `.env.example` for the full documented list (including reserved variables). 
 
 ### 3. `browser_screenshot`
 - **Input**: `filename` (optional), `format` (jpeg/png), `quality` (1-100), `full_page` (boolean), `delay_ms` (0-5000, optional, default 0)
-- **Output**: `{ path, size, truncated }` + image data
-- **CDP Commands**: `Page.getLayoutMetrics`, `Page.captureScreenshot`, `Runtime.evaluate` (warm-up scroll), `Emulation.setDeviceMetricsOverride` / `clearDeviceMetricsOverride`
+- **Output**: `{ path, size, truncated, width, height, scale, measured }` + image data
+- **CDP Commands**: `Page.getLayoutMetrics`, `Page.captureScreenshot`, `Runtime.evaluate` (warm-up scroll)
 - **Security**: Path traversal validation, pixel limit (16M pixels)
-- **Full-page behavior**: (1) warm-up scroll through the page in viewport-sized steps so IntersectionObserver/lazy-rendered sections paint; (2) re-read layout metrics; (3) oversized pages are downscaled via `clip.scale` (full page at lower resolution — never cropped); (4) a temporary full-height viewport override (`Emulation.setDeviceMetricsOverride`) is applied before capture and ALWAYS reset in a `finally` block; (5) `delay_ms > 0` waits before capturing; full-page captures are serialized behind the operation lock
+- **Filename**: the extension is decided by `format` — a matching one is kept (`.jpg`/`.jpeg` for jpeg), any other image extension is replaced, and a name without one gets the format's extension. Appending blindly produced `01-hero.png.jpg`
+- **Full-page behavior**: (1) warm-up scroll through the page in viewport-sized steps so IntersectionObserver/lazy-rendered sections paint; (2) re-read layout metrics; (3) capture with a clip spanning the document and `captureBeyondViewport: true` — the viewport is deliberately NOT resized to the page height; (4) oversized pages are downscaled via `clip.scale` (full page at lower resolution — never cropped); (5) `delay_ms > 0` waits before capturing; full-page captures are serialized behind the operation lock
 - **Viewport behavior**: no `clip` is passed to `Page.captureScreenshot` — an explicit clip with `captureBeyondViewport: false` captures a blank (white/black) frame when the page is scrolled (clip coordinates are page-space and the scrolled surface is never produced). Without a clip, Chromium captures the current viewport at the current scroll position correctly
 
 ### 4. `browser_get_console`
@@ -429,9 +451,9 @@ See `.env.example` for the full documented list (including reserved variables). 
 
 ### 5. `browser_snapshot`
 - **Input**: `include_text` (boolean), `max_items` (max 200, default 100)
-- **Output**: `{ elements, count, truncated }`
+- **Output**: `{ elements, count, truncated, evaluateEnabled }`
 - **CDP Commands**: `Accessibility.getFullAXTree`, `DOM.describeNode`, `Runtime.evaluate`
-- **Purpose**: Returns interactive elements with selectors for automation
+- **Purpose**: Returns interactive elements with selectors for automation. `evaluateEnabled` advertises the `browser_evaluate` gate so a caller can discover it without attempting a call
 
 ### 6. `browser_click`
 - **Input**: `selector` (string), `force` (boolean, default false), `timeout_ms` (optional, default 10000, max 120000)
@@ -459,17 +481,17 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: no (read-only polling)
 
 ### 9. `browser_scroll`
-- **Input**: `direction` (up/down/left/right/top/bottom, optional), `selector` (optional), `x`/`y` (optional), `pixels` (optional) — exactly one mode required
-- **Output**: `{ scrollX, scrollY, mode, ... }`
-- **CDP Commands**: `Runtime.callFunctionOn` (scrollByDirection / scrollToPosition / scrollIntoView + isInViewport)
-- **Behavior**: Mode A scrolls by direction (default 80% of viewport dimension, or exact `pixels`); Mode B scrolls a selector into view and verifies viewport presence; Mode C scrolls to absolute `x`/`y`. Always `behavior: 'instant'` — no smooth-scroll animation. Every runner waits ~100ms + double-rAF (`waitForSettle`) before returning so the compositor has produced a valid frame — a screenshot in the next tool call shows the scrolled content, not a blank frame
-- **Errors**: `INVALID_ARGS` (no mode, conflicting modes, or x without y), `ELEMENT_NOT_FOUND` (selector mode)
+- **Input**: `direction` (up/down/left/right/top/bottom, optional), `selector` (optional), `x`/`y` (optional, either may be omitted — the omitted axis keeps its position), `pixels` (optional) — exactly one mode required
+- **Output**: `{ scrollX, scrollY, mode, ... }`; element mode adds `selector`, `inViewport` (any part visible) and `fullyInViewport` (all of it fits)
+- **CDP Commands**: `Runtime.callFunctionOn` (scrollByDirection / scrollToPosition / scrollIntoView + isInViewport + isFullyInViewport)
+- **Behavior**: Mode A scrolls by direction (default 80% of viewport dimension, or exact `pixels`); Mode B scrolls a selector into view and reports its visibility; Mode C scrolls to absolute `x`/`y`. Always `behavior: 'instant'` — no smooth-scroll animation. Every runner waits ~100ms + double-rAF (`waitForSettle`) before returning so the compositor has produced a valid frame — a screenshot in the next tool call shows the scrolled content, not a blank frame
+- **Errors**: `INVALID_ARGS` (no mode, or conflicting modes), `ELEMENT_NOT_FOUND` (selector mode)
 - **Locked**: no (viewport read/write, not DOM state)
 
 ### 10. `browser_resize`
 - **Input**: `preset` (`mobile`|`tablet`|`desktop`, optional), `width`/`height` (100–10000, optional), `device_scale_factor` (1–4, optional), `mobile` (boolean, optional), `reset` (boolean, optional), `timeout_ms` (optional)
-- **Output**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset }`
-- **CDP Commands**: `Emulation.setDeviceMetricsOverride` / `Emulation.clearDeviceMetricsOverride`
+- **Output**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset, measured, warning? }` — `width`/`height` are the REQUESTED values; `measured` carries the values the page actually has (`innerWidth`/`innerHeight`/`devicePixelRatio`/`scrollX`/`scrollWidth`), and `warning` is present when `innerWidth` differs from the requested width (horizontal overflow or shrink-to-fit)
+- **CDP Commands**: `Emulation.setDeviceMetricsOverride` / `Emulation.clearDeviceMetricsOverride`, `Runtime.evaluate` (measurement)
 - **Behavior**: three exclusive modes — `reset`, a named `preset`, or explicit `width`+`height`. Validation runs on the RAW arguments in `src/viewport.js` (`resolveViewportParams`), never on a Zod-normalized object — Zod `.default()` values would otherwise make `reset` impossible to distinguish from a default and hide an empty `{}` call. The applied viewport is stored on `Browser.viewport` (survives idle shutdown and is re-applied after a restart/reconnect) and a double-rAF settle follows. Presets: mobile `390×844 @3 mobile`, tablet `768×1024 @2 mobile`, desktop `1280×800 @1`.
 - **Errors**: `INVALID_ARGS`, `VIEWPORT_APPLY_FAILED`
 - **Locked**: yes
@@ -500,26 +522,36 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: yes
 - **Security**: a single-character key is logged as `<char>`, never its value
 
+### 14. `browser_get_url`
+- **Input**: none
+- **Output**: `{ url, title, readyState }`
+- **CDP Commands**: `Runtime.evaluate`
+- **Behavior**: reads `window.location.href`, `document.title` and `document.readyState`. This is how a caller asks where the page currently is — after a click that navigated, or after a same-document (hash) navigation. Read-only, never locked, and it reports `about:blank` after a crash restart (see the `sessionReset` signal)
+
 ---
 
 ## Testing Strategy
 
 - **Unit tests**: `node --test tests/*.test.js`
 - **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js` (spawn real Chromium)
-- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`; shared integration harness in `tests/harness.js`
+- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`, `fixtures/lazy-page.html`, `fixtures/tall-page.html`, `fixtures/rtl-page.html`; shared integration harness in `tests/harness.js`
 
 **Test Coverage**:
 - URL validation (scheme, private IP, edge cases)
 - Path traversal prevention
 - CDP request/response correlation
 - Browser lifecycle (start, crash, restart, cleanup)
+- Crash restart (same profile reused, contents preserved, `sessionReset` reported once)
 - Console buffer (add, clear, truncate, filter)
 - MCP tool functionality
+- Reading tools (`get_url` incl. hash navigation, `get_text`, `get_console`, `snapshot`)
 - Interaction tools (click/type/wait_for/scroll) incl. Arabic text and lock serialization
-- Resize (explicit/preset/reset, persistence across navigation, survival of full_page capture)
-- Evaluate (gate disabled, primitives/objects/DOM/cycles/promises/exceptions, truncation)
+- Scroll semantics (single-axis scrolling preserves the other axis; `inViewport` vs `fullyInViewport`)
+- Resize (explicit/preset/reset, measured values + overflow warning, persistence across navigation, survival of full_page capture)
+- Evaluate (gate disabled, gate advertised in snapshot, primitives/objects/DOM/cycles/promises/exceptions, truncation)
 - Hover and key press (Enter form submit, Tab focus, Escape, modifiers, unsupported keys)
 - Screenshot limits (post-capture downscaling, mobile page scale, tall pages)
+- Full-page completeness (lazy rendering, >16M downscale-not-crop, RTL page not distorted)
 - Operation lock (FIFO, queue limit, release on error/timeout)
 - Security (selector/text injection resistance, no sensitive logging)
 
