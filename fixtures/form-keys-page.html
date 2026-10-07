@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Form Keys Fixture</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 700px; margin: 30px auto; padding: 20px; }
+        .echo { padding: 6px 10px; background: #e8f4e8; border: 1px dashed #4a9; font-family: monospace; min-height: 20px; }
+        #modal { padding: 16px; background: #fff3cd; border: 1px solid #c9a; margin: 12px 0; }
+        [role="tablist"] { display: flex; gap: 8px; margin: 12px 0; }
+        [role="tab"] { padding: 6px 12px; border: 1px solid #999; background: #eee; }
+        [role="tab"][aria-selected="true"] { background: #007bff; color: #fff; }
+    </style>
+</head>
+<body>
+    <h1>Form &amp; Keyboard Fixture</h1>
+
+    <form id="login-form">
+        <label for="name-input">Name:</label>
+        <input type="text" id="name-input" name="name" placeholder="Your name">
+        <label for="pwd-input">Password:</label>
+        <input type="password" id="pwd-input" name="pwd" placeholder="Secret">
+        <label for="role-select">Role:</label>
+        <select id="role-select" name="role">
+            <option value="dev">Developer</option>
+            <option value="ops">Operations</option>
+        </select>
+        <button type="submit" id="login-submit">Log in</button>
+    </form>
+    <p id="submit-result" class="echo">not submitted</p>
+
+    <div>
+        <label><input type="checkbox" id="agree-check"> I agree</label>
+        <label><input type="radio" id="plan-free" name="plan" value="free"> Free</label>
+        <label><input type="radio" id="plan-pro" name="plan" value="pro"> Pro</label>
+    </div>
+
+    <div>
+        <button id="switch-wifi" role="switch" aria-checked="false">Wi-Fi</button>
+        <label for="volume-slider">Volume:</label>
+        <input type="range" id="volume-slider" min="0" max="100" value="30">
+        <input type="search" id="site-search" placeholder="Search site">
+    </div>
+
+    <div role="tablist" aria-label="Fixture tabs">
+        <button role="tab" aria-selected="true" id="tab-a">Tab A</button>
+        <button role="tab" aria-selected="false" id="tab-b">Tab B</button>
+    </div>
+
+    <p><a href="/page2.html" id="more-link">More info</a></p>
+
+    <div>
+        <label for="editor">Notes:</label>
+        <div id="editor" contenteditable="true">Edit me</div>
+    </div>
+
+    <button type="button" id="open-modal-btn">Open modal</button>
+    <div id="modal" style="display: none;">
+        <p>Modal dialog — press Escape to close.</p>
+    </div>
+
+    <p id="key-result" class="echo">no key</p>
+    <div id="delayed-slot"></div>
+
+    <script>
+        console.log('Form-keys fixture loaded');
+
+        document.getElementById('login-form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            var v = document.getElementById('name-input').value;
+            document.getElementById('submit-result').textContent = 'Form submitted: ' + v;
+        });
+
+        document.getElementById('switch-wifi').addEventListener('click', function () {
+            var on = this.getAttribute('aria-checked') === 'true';
+            this.setAttribute('aria-checked', on ? 'false' : 'true');
+        });
+
+        document.getElementById('open-modal-btn').addEventListener('click', function () {
+            document.getElementById('modal').style.display = 'block';
+        });
+        document.addEventListener('keydown', function (e) {
+            var kr = document.getElementById('key-result');
+            if (kr) {
+                kr.textContent = 'key=' + e.key +
+                    ' ctrl=' + e.ctrlKey + ' shift=' + e.shiftKey +
+                    ' alt=' + e.altKey + ' meta=' + e.metaKey;
+            }
+            if (e.key === 'Escape') {
+                document.getElementById('modal').style.display = 'none';
+            }
+        });
+
+        // Async marker for browser_wait_for text matching.
+        setTimeout(function () {
+            var p = document.createElement('p');
+            p.id = 'delayed-text';
+            p.textContent = 'async marker READY-123';
+            document.getElementById('delayed-slot').appendChild(p);
+        }, 1500);
+    </script>
+</body>
+</html>

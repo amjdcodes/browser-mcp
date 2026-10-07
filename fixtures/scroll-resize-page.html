@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scroll Resize Fixture</title>
+    <style>
+        html, body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #top-marker { padding: 16px; background: #eef; }
+        #small-box {
+            width: 100px; height: 100px; margin: 20px;
+            background: #4a90d9; color: #fff;
+        }
+        /* Taller than any test viewport: can be partially visible but never fully. */
+        #tall-element {
+            width: 200px; height: 2500px; margin: 20px;
+            background: linear-gradient(#7ed07e, #2a7d2a); color: #fff;
+        }
+        /* Forces horizontal overflow so browser_resize reports a warning. */
+        #wide-strip {
+            width: 2000px; height: 40px; margin: 20px 0;
+            background: #eee; border: 1px solid #999;
+        }
+        #sec-a, #sec-b { padding: 40px 16px; border-top: 2px solid #333; }
+        #far-bottom { margin-top: 1500px; padding: 40px 16px; background: #ffe08a; }
+    </style>
+</head>
+<body>
+    <div id="top-marker">Scroll-resize fixture top</div>
+    <div id="small-box">small</div>
+    <div id="sec-a"><h2>Section A</h2><p>Hash target A.</p></div>
+    <div id="tall-element">tall element (2500px)</div>
+    <div id="wide-strip">wide horizontal content (2000px)</div>
+    <div id="sec-b"><h2>Section B</h2><p>Hash target B.</p></div>
+    <div id="far-bottom">Far bottom marker</div>
+    <script>
+        console.log('Scroll-resize fixture loaded');
+    </script>
+</body>
+</html>
