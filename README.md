@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-stdio%20JSON--RPC-blue)
 ![Chromium](https://img.shields.io/badge/Chromium-150.0.7871.100-4285F4?logo=googlechrome&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-aarch64%20%C2%B7%20x86__64-lightgrey)
-![Tests](https://img.shields.io/badge/tests-281%20(node%3Atest)-blue)
+![Tests](https://img.shields.io/badge/tests-303%20(node%3Atest)-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 # browser-mcp
@@ -128,7 +128,7 @@ browser-mcp/
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, capability gates, CONFIG
-├── tests/                    # 281 tests across 23 files (node:test + node:assert/strict)
+├── tests/                    # 303 tests across 25 files (node:test + node:assert/strict)
 │   ├── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
 │   ├── utils.test.js         # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js      # viewport.js presets and raw-argument validation
@@ -153,6 +153,8 @@ browser-mcp/
 │   ├── memory.test.js        # Truncation and memory-bound behavior
 │   ├── cleanup.test.js       # Process and profile cleanup, orphan reaping, no leaks
 │   └── webgl.test.js         # webgl_info / canvas_info / shim (and its gate) / trace / capture_frames
+│   ├── tool-coverage.test.js   # Error codes and boundary flags across all 19 tools
+│   └── fixture-pages.test.js   # scroll-resize / form-keys / console-motion fixture coverage
 ├── fixtures/                 # Test HTML pages
 │   ├── test-page.html        # Shared interactive fixture
 │   ├── page2.html            # Navigation target
@@ -160,6 +162,9 @@ browser-mcp/
 │   ├── tall-page.html        # Full-page screenshot fixture (3000×19400)
 │   ├── rtl-page.html         # Arabic RTL: fixed sidebar + 100vh hero
 │   └── webgl-page.html       # WebGL app (fails without a GPU) + Canvas2D control + DOM animation
+│   ├── scroll-resize-page.html # Tall/overflowing layout for scroll semantics + resize measurement
+│   ├── form-keys-page.html     # Form, keyboard, roles, and async text for press/type/wait_for/snapshot
+│   └── console-motion-page.html # Console levels, canvases, and animation for console/canvas/frames
 ├── screenshots/              # Screenshot output directory (runtime, override with OUTPUT_DIR)
 ├── stress-test.sh            # Start/stop cycles: Chromium leak + RSS growth check
 ├── install-chromium.sh       # Installs Chromium (Debian archive on Ubuntu, APT-pinned)
@@ -583,7 +588,7 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ## Testing and Quality
 
 ```bash
-# Run the full suite (281 tests across 23 files)
+# Run the full suite (303 tests across 25 files)
 npm test
 
 # Run a single test file
@@ -601,6 +606,7 @@ Coverage spans:
 - **Browser lifecycle**: launch, crash + restart (profile reused, contents preserved, `sessionReset` reported once), WebSocket reconnect, lazy start, idle shutdown, cleanup with no leaked processes and orphan reaping
 - **Tool integration**: reading tools (incl. `get_url` across a hash navigation), interaction tools (click/type/wait_for/scroll), scroll semantics (single-axis, `inViewport` vs `fullyInViewport`), resize (presets, measured values + overflow warning, persistence, full-page survival), evaluate (gate advertised in snapshot, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot filename resolution and limit enforcement, full-page completeness on lazy/RTL/tall pages, parallel instances and lock serialization
 - **WebGL**: availability reporting and console classification, canvas blankness vs. a drawn control canvas, the shim's install/boot/remove cycle and its `ENABLE_WEBGL_SHIM` gate, shader/uniform/draw-call tracing and `clear`, and frame capture over both the screencast stream and polling with an element clip
+- **Error codes and boundaries**: documented failure paths for every tool (`INVALID_URL`, private-network block, `ELEMENT_NOT_FOUND`, `INVALID_ARGS`, `KEY_NOT_SUPPORTED`, `UNSAFE_PATH`, truncation flags), exercised against three purpose-built fixtures (scroll-resize, form-keys, console-motion)
 - **Security**: injection resistance and absence of sensitive logging
 
 Integration tests spawn real Chromium, so they require Chromium to be installed (see [Install Chromium](#install-chromium)). `--test-concurrency=3` keeps concurrent Chromium instances bounded on low-RAM devices (5.5 GB in testing); raise it on beefier hardware. On very small devices, `memory.test.js` (50 start/stop cycles) is the heaviest file — run it alone and last.

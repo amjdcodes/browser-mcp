@@ -26,7 +26,7 @@ browser-mcp/
 │   ├── utils.js                # Validation, truncation, error formatting, image size decode, capability gates
 │   ├── viewport.js             # Viewport presets + raw resize validation
 │   └── webgl.js                # Static WebGL shim sources, trace expressions, console classification
-├── tests/                      # 23 test files (node:test + node:assert/strict)
+├── tests/                      # 25 test files (node:test + node:assert/strict)
 │   ├── harness.js              # Shared harness (fixture server, MCP child, buffered JSON-RPC)
 │   ├── utils.test.js           # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js        # Presets + raw resize-argument validation
@@ -50,12 +50,19 @@ browser-mcp/
 │   ├── evaluate.test.js        # evaluate: gate, primitives, DOM, cycles, promises, errors
 │   ├── hover-press.test.js     # hover and key press (Enter/Tab/Escape/modifiers)
 │   └── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
+│   ├── webgl.test.js             # webgl_info / canvas_info / shim (and its gate) / trace / capture_frames
+│   ├── tool-coverage.test.js     # Error codes and boundary flags across all 19 tools
+│   └── fixture-pages.test.js     # scroll-resize / form-keys / console-motion fixture coverage
 ├── fixtures/                   # Test fixtures
 │   ├── test-page.html          # Shared HTML test fixture (interactive)
 │   ├── page2.html              # Navigation target for click tests
 │   ├── lazy-page.html          # IntersectionObserver / lazy rendering
 │   ├── tall-page.html          # 3000x19400 page for full-page downscaling
-│   └── rtl-page.html           # Arabic RTL: fixed sidebar + 100vh hero
+│   ├── rtl-page.html           # Arabic RTL: fixed sidebar + 100vh hero
+│   ├── webgl-page.html         # WebGL app (fails without a GPU) + Canvas2D control + DOM animation
+│   ├── scroll-resize-page.html # Tall/overflowing layout for scroll semantics + resize measurement
+│   ├── form-keys-page.html     # Form, keyboard, roles, and async text for press/type/wait_for/snapshot
+│   └── console-motion-page.html # Console levels, canvases, and animation for console/canvas/frames
 ├── screenshots/                # Screenshot output directory (runtime)
 └── node_modules/               # Dependencies
 ```
@@ -577,8 +584,8 @@ See `.env.example` for the full documented list (including reserved variables). 
 ## Testing Strategy
 
 - **Unit tests**: `node --test tests/*.test.js`
-- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js`, `webgl.test.js` (spawn real Chromium)
-- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`, `fixtures/lazy-page.html`, `fixtures/tall-page.html`, `fixtures/rtl-page.html`, `fixtures/webgl-page.html`; shared integration harness in `tests/harness.js` (which strips `ENABLE_EVAL_JS` / `ENABLE_WEBGL_SHIM` from the inherited environment so the disabled default is what gets tested)
+- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js`, `webgl.test.js`, `tool-coverage.test.js`, `fixture-pages.test.js` (spawn real Chromium)
+- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`, `fixtures/lazy-page.html`, `fixtures/tall-page.html`, `fixtures/rtl-page.html`, `fixtures/webgl-page.html`, `fixtures/scroll-resize-page.html`, `fixtures/form-keys-page.html`, `fixtures/console-motion-page.html`; shared integration harness in `tests/harness.js` (which strips `ENABLE_EVAL_JS` / `ENABLE_WEBGL_SHIM` from the inherited environment so the disabled default is what gets tested; `fixture-pages.test.js` opts into `ENABLE_EVAL_JS=1` to assert focus and visibility directly)
 
 **Test Coverage**:
 - URL validation (scheme, private IP, edge cases)
@@ -597,6 +604,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - Screenshot limits (post-capture downscaling, mobile page scale, tall pages)
 - Full-page completeness (lazy rendering, >16M downscale-not-crop, RTL page not distorted)
 - WebGL (availability + console classification, canvas blankness vs. a drawn control, shim install/boot/remove and its `ENABLE_WEBGL_SHIM` gate, trace contents and `clear`, frame capture via screencast and poll)
+- Error codes and boundaries (`tool-coverage.test.js`: `INVALID_URL`, private-network block, `ELEMENT_NOT_FOUND`, `INVALID_ARGS`, `KEY_NOT_SUPPORTED`, `UNSAFE_PATH`, truncation flags; `fixture-pages.test.js`: scroll/resize semantics, keyboard form flow, console levels, canvas sizes, element-clipped frames)
 - Operation lock (FIFO, queue limit, release on error/timeout)
 - Security (selector/text injection resistance, no sensitive logging)
 

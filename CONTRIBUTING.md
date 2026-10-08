@@ -14,7 +14,7 @@ browser-mcp is a small, deliberately thin MCP server — and that thinness is th
 
 - **Raw CDP, three dependencies** — the protocol is spoken directly over a WebSocket, with no Puppeteer or Playwright layer to install, pin, or debug. The runtime surface is `@modelcontextprotocol/sdk`, `ws`, and `zod`.
 - **19 tools, one consistent pattern** — every tool follows the same validate → ready → act → reset flow, so a new tool reads like the ones already there.
-- **281 tests across 23 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
+- **303 tests across 25 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
 - **ARM64-native and resource-minded** — developed and verified on aarch64, with lazy browser start, idle shutdown, a bounded operation queue, and a stress test for start/stop cycles.
 - **Security-first defaults** — arbitrary JavaScript evaluation and the WebGL stand-in are both opt-in and refused by default; selectors and typed text are never concatenated into page JavaScript.
 - **The hard edges are already documented** — blank screenshots on scrolled pages, stale frames, hash-only navigation, crash restarts that keep the profile, and overlay-covered clicks each have a test and a paragraph explaining the fix.
@@ -72,7 +72,7 @@ npm install
 # Chromium is reachable
 chromium --headless --no-sandbox --dump-dom about:blank
 
-# The suite passes (281 tests across 23 files; integration tests spawn real Chromium)
+# The suite passes (303 tests across 25 files; integration tests spawn real Chromium)
 npm test
 ```
 
@@ -95,7 +95,7 @@ browser-mcp/
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, capability gates, CONFIG
-├── tests/                    # 281 tests across 23 files (node:test + node:assert/strict)
+├── tests/                    # 303 tests across 25 files (node:test + node:assert/strict)
 │   └── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
 ├── fixtures/                 # Test HTML pages (interactive, lazy, tall, RTL, WebGL)
 ├── screenshots/              # Screenshot output directory (runtime; override with OUTPUT_DIR)
@@ -175,7 +175,7 @@ Follow the pattern already used by the 19 existing tools:
 ## Testing
 
 ```bash
-# Full suite — 281 tests across 23 files
+# Full suite — 303 tests across 25 files
 npm test
 
 # A single file while iterating
