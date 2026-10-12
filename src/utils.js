@@ -27,6 +27,8 @@ const MAX_SCREENSHOT_PIXELS = envInt('MAX_SCREENSHOT_PIXELS', 16_000_000);
 const MAX_EVAL_LENGTH = envInt('MAX_EVAL_LENGTH', 100_000);
 const MAX_WEBGL_TRACE_LENGTH = envInt('MAX_WEBGL_TRACE_LENGTH', 100_000);
 const MAX_WEBGL_CANVASES = envInt('MAX_WEBGL_CANVASES', 50);
+const MAX_WEBMCP_TOOLS = envInt('MAX_WEBMCP_TOOLS', 64);
+const MAX_WEBMCP_RESULT_LENGTH = envInt('MAX_WEBMCP_RESULT_LENGTH', 100_000);
 
 const QUEUE_LIMIT = envInt('QUEUE_LIMIT', 8);
 
@@ -190,6 +192,18 @@ export function isWebglShimEnabled() {
 }
 
 /**
+ * Whether WebMCP support is enabled. ENABLED by default: the browser launches
+ * with --enable-features=WebMCP and the browser_webmcp_* tools become usable,
+ * letting an agent discover and invoke the tools any page declares to AI agents
+ * (document.modelContext). Set ENABLE_WEBMCP=0 to turn the capability off.
+ */
+export function isWebmcpEnabled() {
+  const raw = (process.env.ENABLE_WEBMCP || '').trim().toLowerCase();
+  if (raw === '0' || raw === 'false' || raw === 'no') return false;
+  return true;
+}
+
+/**
  * Read the real pixel dimensions of an encoded PNG or JPEG image buffer,
  * without any external dependency. Returns null when the format is unknown
  * or the header cannot be parsed (callers fall back to their estimate).
@@ -268,7 +282,13 @@ export const ERRORS = {
   SCREENSHOT_TOO_LARGE: 'SCREENSHOT_TOO_LARGE',
   WEBGL_SHIM_DISABLED: 'WEBGL_SHIM_DISABLED',
   WEBGL_SHIM_MODE_INVALID: 'WEBGL_SHIM_MODE_INVALID',
-  WEBGL_TRACE_UNAVAILABLE: 'WEBGL_TRACE_UNAVAILABLE'
+  WEBGL_TRACE_UNAVAILABLE: 'WEBGL_TRACE_UNAVAILABLE',
+  WEBMCP_DISABLED: 'WEBMCP_DISABLED',
+  WEBMCP_UNAVAILABLE: 'WEBMCP_UNAVAILABLE',
+  WEBMCP_TOOL_NOT_FOUND: 'WEBMCP_TOOL_NOT_FOUND',
+  WEBMCP_AMBIGUOUS_TOOL: 'WEBMCP_AMBIGUOUS_TOOL',
+  WEBMCP_CALL_FAILED: 'WEBMCP_CALL_FAILED',
+  WEBMCP_CALL_TIMEOUT: 'WEBMCP_CALL_TIMEOUT'
 };
 
 export const CONFIG = {
@@ -285,5 +305,7 @@ export const CONFIG = {
   MAX_EVAL_LENGTH,
   MAX_WEBGL_TRACE_LENGTH,
   MAX_WEBGL_CANVASES,
+  MAX_WEBMCP_TOOLS,
+  MAX_WEBMCP_RESULT_LENGTH,
   QUEUE_LIMIT
 };

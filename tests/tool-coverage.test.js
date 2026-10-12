@@ -1,6 +1,6 @@
 // tests/tool-coverage.test.js
 // ---------------------------------------------------------------------------
-// Supplementary coverage for the 19 MCP tools: documented error codes and
+// Supplementary coverage for the 21 MCP tools: documented error codes and
 // boundary flags that the per-tool suites exercise only indirectly (or not at
 // all). Each case asserts a code/behavior taken from README.md / ARCHITECTURE.md.
 //
@@ -160,5 +160,21 @@ describe('tool coverage — error codes and boundary flags', () => {
     assert.equal(report.sampled, 1);
     assert.equal(report.truncated, true);
     assert.equal(report.canvases.length, 1);
+  });
+
+  it('browser_webmcp_* surface documented error codes', async () => {
+    assertSuccess(await call('browser_navigate', { url: `${origin}/webmcp-page.html` }, 60000));
+
+    const listed = assertSuccess(await call('browser_webmcp_list_tools', {}));
+    assert.equal(listed.untrusted, true);
+    assert.ok(listed.tools.some((t) => t.name === 'add'));
+
+    const notFound = await call('browser_webmcp_call_tool', { name: 'no-such-tool-xyz' });
+    assert.equal(notFound.result.isError, true);
+    assert.match(resultText(notFound), /WEBMCP_TOOL_NOT_FOUND|WEBMCP_UNAVAILABLE/);
+
+    const failed = await call('browser_webmcp_call_tool', { name: 'fail' });
+    assert.equal(failed.result.isError, true);
+    assert.match(resultText(failed), /WEBMCP_CALL_FAILED|WEBMCP_UNAVAILABLE/);
   });
 });

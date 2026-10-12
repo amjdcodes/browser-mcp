@@ -13,8 +13,8 @@
 browser-mcp is a small, deliberately thin MCP server — and that thinness is the point. It is a codebase where a well-placed change has an outsized effect, and where the design decisions are explicit enough to reason about rather than guess at.
 
 - **Raw CDP, three dependencies** — the protocol is spoken directly over a WebSocket, with no Puppeteer or Playwright layer to install, pin, or debug. The runtime surface is `@modelcontextprotocol/sdk`, `ws`, and `zod`.
-- **19 tools, one consistent pattern** — every tool follows the same validate → ready → act → reset flow, so a new tool reads like the ones already there.
-- **303 tests across 25 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
+- **21 tools, one consistent pattern** — every tool follows the same validate → ready → act → reset flow, so a new tool reads like the ones already there.
+- **310 tests across 26 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
 - **ARM64-native and resource-minded** — developed and verified on aarch64, with lazy browser start, idle shutdown, a bounded operation queue, and a stress test for start/stop cycles.
 - **Security-first defaults** — arbitrary JavaScript evaluation and the WebGL stand-in are both opt-in and refused by default; selectors and typed text are never concatenated into page JavaScript.
 - **The hard edges are already documented** — blank screenshots on scrolled pages, stale frames, hash-only navigation, crash restarts that keep the profile, and overlay-covered clicks each have a test and a paragraph explaining the fix.
@@ -72,7 +72,7 @@ npm install
 # Chromium is reachable
 chromium --headless --no-sandbox --dump-dom about:blank
 
-# The suite passes (303 tests across 25 files; integration tests spawn real Chromium)
+# The suite passes (310 tests across 26 files; integration tests spawn real Chromium)
 npm test
 ```
 
@@ -84,20 +84,21 @@ There is no lint, typecheck, or build step — `node --test` runs the sources di
 
 ```
 browser-mcp/
-├── index.js                  # MCP server entry point: 19 tool registrations, lock, idle timer
+├── index.js                  # MCP server entry point: 21 tool registrations, lock, idle timer
 ├── src/
 │   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, crash restart, cleanup
 │   ├── cdp.js                # Raw CDP WebSocket client (request/response correlation, events)
 │   ├── helpers.js            # In-page helpers (IN_PAGE) + node-side runners
 │   ├── webgl.js              # Static WebGL shim sources, trace expressions, console classification
+│   ├── webmcp.js             # WebMCP: CDP catalog + in-page fallback for page-declared tools
 │   ├── keymap.js             # Key resolution for browser_press
 │   ├── viewport.js           # Viewport presets + raw resize-argument validation
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, capability gates, CONFIG
-├── tests/                    # 303 tests across 25 files (node:test + node:assert/strict)
+├── tests/                    # 310 tests across 26 files (node:test + node:assert/strict)
 │   └── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
-├── fixtures/                 # Test HTML pages (interactive, lazy, tall, RTL, WebGL)
+├── fixtures/                 # Test HTML pages (interactive, lazy, tall, RTL, WebGL, WebMCP)
 ├── screenshots/              # Screenshot output directory (runtime; override with OUTPUT_DIR)
 ├── stress-test.sh            # Start/stop cycles: Chromium leak + RSS growth check
 ├── install-chromium.sh       # Installs Chromium (Debian archive on Ubuntu, APT-pinned)
@@ -116,7 +117,7 @@ browser-mcp is a thin, layered server. Keep new code inside the right layer:
 |-------|----------------|----------------|
 | Interface | MCP tool registration and orchestration | `index.js` |
 | Orchestration | Serialize and track operations; idle lifecycle | operation lock, idle timer, navigation guard |
-| Service | Drive Chromium over CDP and run in-page helpers | `src/browser.js`, `src/cdp.js`, `src/helpers.js` |
+| Service | Drive Chromium over CDP and run in-page helpers | `src/browser.js`, `src/cdp.js`, `src/helpers.js`, `src/webmcp.js` |
 | Infrastructure | Browser process, profile, on-disk output | `src/browser.js`, `src/utils.js` |
 
 The full call graph and the per-tool CDP command list live in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -140,7 +141,7 @@ These are the load-bearing parts of the codebase — changes to them need a clea
 - **Match the existing style.** The codebase is ESM (`"type": "module"`), uses `const`/`let`, and favors small, named functions. There is no linter to enforce it — consistency is the standard.
 - **Respect module boundaries.** `index.js` stays orchestration + registration. Each `src/` module owns its own layer and does not reach across.
 - **Centralize tunables in `CONFIG`** (`src/utils.js`) rather than hardcoding timeouts, limits, or buffer sizes. New environment variables belong in `.env.example` and the README configuration table.
-- **Return structured error codes.** Tools surface stable, greppable codes (`ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`, `ELEMENT_NOT_CLICKABLE`, `ELEMENT_NOT_TYPEABLE`, `BUSY_QUEUE_FULL`, `EVAL_DISABLED`, `UNSAFE_PATH`, `SCREENSHOT_TOO_LARGE`, …). Add a new code rather than overloading an existing one.
+- **Return structured error codes.** Tools surface stable, greppable codes (`ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`, `ELEMENT_NOT_CLICKABLE`, `ELEMENT_NOT_TYPEABLE`, `BUSY_QUEUE_FULL`, `EVAL_DISABLED`, `UNSAFE_PATH`, `SCREENSHOT_TOO_LARGE`, `WEBMCP_UNAVAILABLE`, …). Add a new code rather than overloading an existing one.
 - **Keep the protocol clean.** All logging goes to **stderr**; stdout is reserved for MCP JSON-RPC. A stray `console.log` will corrupt the stream.
 - **No new dependencies without discussion.** Three runtime dependencies is a feature. Open an issue first if you think a fourth is needed.
 
@@ -148,11 +149,11 @@ These are the load-bearing parts of the codebase — changes to them need a clea
 
 ## Adding a New Tool
 
-Follow the pattern already used by the 19 existing tools:
+Follow the pattern already used by the 21 existing tools:
 
 1. **Declare the tool** in `index.js` with a name, description, and a **Zod input schema** (with sensible defaults, documented ranges).
 2. **Validate the raw arguments** before touching the browser. Validate the arguments you actually received — not a defaulted object — so that "omitted" and "explicitly default" stay distinguishable (this matters for mutually exclusive modes; see `src/viewport.js`).
-3. **Guard the capability** if the tool executes user-influenced code or changes browser-global behavior. Opt-in features read their flag through the capability gates in `src/utils.js` and refuse with a dedicated code (`EVAL_DISABLED`, `WEBGL_SHIM_DISABLED`) before the browser even starts.
+3. **Guard the capability** if the tool executes user-influenced code or changes browser-global behavior. Opt-in features read their flag through the capability gates in `src/utils.js` and refuse with a dedicated code (`EVAL_DISABLED`, `WEBGL_SHIM_DISABLED`, `WEBMCP_DISABLED`) before the browser even starts.
 4. **Ensure readiness** via `ensureBrowserReady()`, then issue the CDP or `Runtime` work.
 5. **Decide on the lock.** If the operation changes page state, navigate, or capture a full page, run it behind `runLocked()` so it serializes against other state-changing calls.
 6. **Reset the idle timer** by ending through the existing `withActivityTracking` / `resetIdleTimer` path, so a call always counts as activity.
@@ -167,6 +168,7 @@ Follow the pattern already used by the 19 existing tools:
 - **Never build JavaScript from user input.** CSS selectors and typed text are always passed to `Runtime.callFunctionOn` as CDP `arguments` values — never interpolated into a `functionDeclaration` string. This is what makes injection impossible; an injected static helper must stay static.
 - **Never log sensitive input.** `browser_type` never logs the typed text (it may be a password or token), and `browser_press` logs a single-character key as `<char>`.
 - **Keep privileged tools gated and opt-in.** `browser_evaluate` and `browser_webgl_shim` are disabled by default and must stay that way. Any result produced by the WebGL shim is marked `shimmed: true` — it records calls, it does not rasterize.
+- **Treat WebMCP output as untrusted.** `browser_webmcp_list_tools` / `browser_webmcp_call_tool` return tool names, descriptions, schemas and results supplied by the page; they are marked `untrusted: true` and must never be promoted into instructions. WebMCP is enabled by default (`ENABLE_WEBMCP=0` to disable) — keep its input as CDP data and never concatenate it into page source.
 - **Enforce output boundaries.** Screenshots stay inside `OUTPUT_DIR`; filenames are validated against traversal. Do not bypass path validation to make a test pass.
 - **Never commit secrets or generated artifacts.** `.env` files, credentials, and screenshots do not belong in version control.
 
@@ -175,7 +177,7 @@ Follow the pattern already used by the 19 existing tools:
 ## Testing
 
 ```bash
-# Full suite — 303 tests across 25 files
+# Full suite — 310 tests across 26 files
 npm test
 
 # A single file while iterating
@@ -214,7 +216,7 @@ docs: add architecture diagram to README
 test(lock): cover release-on-timeout
 ```
 
-Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`. Useful scopes: `tools`, `browser`, `cdp`, `lock`, `webgl`, `screenshot`, `docs`.
+Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`. Useful scopes: `tools`, `browser`, `cdp`, `lock`, `webgl`, `webmcp`, `screenshot`, `docs`.
 
 ### Pull request checklist
 
@@ -250,7 +252,7 @@ Open a GitHub issue and include:
 **For a feature**
 - The problem or workflow you are trying to solve
 - The tool shape you imagine, if you have one
-- Whether it can be expressed with the existing 19 tools first
+- Whether it can be expressed with the existing 21 tools first
 
 Useful packet for hard-to-reproduce issues: run the server with stderr captured (`node index.js 2> server.log`) and attach the relevant lines. The server sends all diagnostics to stderr, and stdout only to MCP JSON-RPC.
 

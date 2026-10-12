@@ -11,6 +11,7 @@ import {
   validateSafePath,
   isEvalJsEnabled,
   isWebglShimEnabled,
+  isWebmcpEnabled,
   decodeImageSize,
   ERRORS,
   CONFIG
@@ -33,6 +34,7 @@ import {
   canvasInfo
 } from './src/helpers.js';
 import { TRACE_SUMMARY_EXPRESSION, TRACE_CLEAR_EXPRESSION } from './src/webgl.js';
+import { listWebmcpTools, callWebmcpTool } from './src/webmcp.js';
 import { resolveViewportParams } from './src/viewport.js';
 import { resolveKey } from './src/keymap.js';
 import { writeFile, mkdir } from 'node:fs/promises';
@@ -1069,7 +1071,12 @@ registerTool(
             truncated: interactiveElements.length >= max_items,
             // Snapshot is the discovery tool: advertise whether browser_evaluate
             // is usable here, instead of letting the caller find out by failing.
-            evaluateEnabled: isEvalJsEnabled()
+            evaluateEnabled: isEvalJsEnabled(),
+            // WebMCP: `webmcpEnabled` is the env gate (on by default);
+            // `webmcpAvailable` is the runtime probe for this browser session
+            // (whether the CDP WebMCP domain / page API actually exists here).
+            webmcpEnabled: isWebmcpEnabled(),
+            webmcpAvailable: browser.webmcpAvailable === true
           })
         }]
       };
@@ -2032,6 +2039,116 @@ registerTool(
 
       } catch (err) {
         process.stderr.write(`[MCP] Capture frames error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
+  }
+);
+
+registerTool(
+  'browser_webmcp_list_tools',
+  'List the WebMCP tools the current page declares to AI agents (page-provided tools)',
+  {
+    max_tools: z.number().int().min(1).max(200).optional().default(CONFIG.MAX_WEBMCP_TOOLS)
+  },
+  async ({ max_tools }) => {
+    // Capability gate: WebMCP is enabled by default but can be turned off.
+    if (!isWebmcpEnabled()) {
+      return formatToolError(toolError(
+        ERRORS.WEBMCP_DISABLED,
+        'WebMCP support is disabled (ENABLE_WEBMCP=0). Unset it or set ' +
+        'ENABLE_WEBMCP=1 in the MCP server environment to list page tools.'
+      ));
+    }
+
+    try {
+      await ensureBrowserReady();
+
+      if (navigationPromise) {
+        await navigationPromise.catch(() => {});
+      }
+
+      const timeout = capTimeout(undefined, CONFIG.TOOL_DEFAULT_TIMEOUT_MS);
+      process.stderr.write(`[MCP] Listing WebMCP tools (max ${max_tools})\n`);
+
+      const report = await listWebmcpTools(browser, { maxTools: max_tools, timeoutMs: timeout });
+      resetIdleTimer();
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            webmcp: true,
+            untrusted: true,
+            count: report.tools.length,
+            ...report
+          })
+        }]
+      };
+
+    } catch (err) {
+      process.stderr.write(`[MCP] WebMCP list error: ${err.message}\n`);
+      return formatToolError(err);
+    }
+  }
+);
+
+registerTool(
+  'browser_webmcp_call_tool',
+  'Invoke a WebMCP tool the current page declares to AI agents, by name, with JSON input',
+  {
+    name: z.string().min(1),
+    input: z.record(z.any()).optional().default({}),
+    frame_id: z.string().optional(),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  },
+  async ({ name, input, frame_id, timeout_ms }) => {
+    if (!isWebmcpEnabled()) {
+      return formatToolError(toolError(
+        ERRORS.WEBMCP_DISABLED,
+        'WebMCP support is disabled (ENABLE_WEBMCP=0). Unset it or set ' +
+        'ENABLE_WEBMCP=1 in the MCP server environment to invoke page tools.'
+      ));
+    }
+
+    return runLocked(async () => {
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        const timeout = capTimeout(timeout_ms, CONFIG.TOOL_DEFAULT_TIMEOUT_MS);
+        // Only the tool name is logged — `input` may carry sensitive values.
+        process.stderr.write(`[MCP] WebMCP call: ${name}\n`);
+
+        const result = await callWebmcpTool(browser, {
+          name,
+          input,
+          frameId: frame_id ?? null
+        }, timeout);
+
+        resetIdleTimer();
+
+        const json = JSON.stringify({ webmcp: true, ...result });
+        const cut = truncateText(json, CONFIG.MAX_WEBMCP_RESULT_LENGTH);
+
+        return {
+          content: [{
+            type: 'text',
+            text: cut.truncated
+              ? JSON.stringify({
+                truncated: true,
+                reason: `response exceeded MAX_WEBMCP_RESULT_LENGTH (${CONFIG.MAX_WEBMCP_RESULT_LENGTH} characters)`,
+                json: cut.text
+              })
+              : json
+          }]
+        };
+
+      } catch (err) {
+        process.stderr.write(`[MCP] WebMCP call error: ${err.message}\n`);
         return formatToolError(err);
       }
     });

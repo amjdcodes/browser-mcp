@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebMCP Test Page</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; }
+  #status { font-weight: 600; }
+</style>
+</head>
+<body>
+<h1 id="title">WebMCP Test Page</h1>
+<p id="status">initializing</p>
+
+<script>
+// If the browser provides the real WebMCP API, use it. Otherwise install a
+// minimal in-page stand-in implementing registerTool/getTools/executeTool so
+// that browser-mcp's WebMCP *fallback* path can be exercised deterministically
+// regardless of whether the installed Chromium supports the experimental
+// feature. window.__webmcpMode records which one is in use.
+(function () {
+  var mc = document.modelContext || (navigator && navigator.modelContext);
+  if (mc && typeof mc.registerTool === 'function' &&
+      typeof mc.getTools === 'function' && typeof mc.executeTool === 'function') {
+    window.__webmcpMode = 'native';
+    return;
+  }
+
+  var registry = new Map();
+  var polyfill = {
+    registerTool: function (tool) { registry.set(tool.name, tool); return Promise.resolve(); },
+    unregisterTool: function (name) { registry.delete(name); return Promise.resolve(); },
+    getTools: function () { return Promise.resolve(Array.prototype.slice.call(registry.values())); },
+    executeTool: function (tool, input) {
+      var found = registry.get(tool && tool.name);
+      if (!found) return Promise.reject(new Error('Tool not registered: ' + (tool && tool.name)));
+      return Promise.resolve(found.execute(input || {}));
+    }
+  };
+
+  try {
+    Object.defineProperty(document, 'modelContext', { value: polyfill, configurable: true });
+  } catch (e) {
+    document.modelContext = polyfill;
+  }
+  window.__webmcpMode = 'polyfill';
+})();
+
+function register(tool) {
+  try {
+    return Promise.resolve(document.modelContext.registerTool(tool)).catch(function (e) {
+      document.getElementById('status').textContent = 'register failed: ' + tool.name + ': ' + e;
+    });
+  } catch (e) {
+    document.getElementById('status').textContent = 'register threw: ' + tool.name + ': ' + e;
+  }
+}
+
+register({
+  name: 'add',
+  description: 'Add two numbers and return the sum as text.',
+  inputSchema: {
+    type: 'object',
+    properties: { a: { type: 'number' }, b: { type: 'number' } },
+    required: ['a', 'b']
+  },
+  execute: function (input) {
+    var sum = Number(input.a) + Number(input.b);
+    document.getElementById('status').textContent = 'add=' + sum;
+    return { content: [{ type: 'text', text: String(sum) }] };
+  }
+});
+
+register({
+  name: 'fail',
+  description: 'Always throws, to exercise error mapping.',
+  inputSchema: { type: 'object', properties: {} },
+  execute: function () { throw new Error('intentional failure'); }
+});
+
+register({
+  name: 'big',
+  description: 'Returns a large payload, to exercise result truncation.',
+  inputSchema: { type: 'object', properties: {} },
+  execute: function () {
+    return { content: [{ type: 'text', text: new Array(200001).join('x') }] };
+  }
+});
+
+document.getElementById('status').textContent = 'registered:' + window.__webmcpMode;
+</script>
+</body>
+</html>

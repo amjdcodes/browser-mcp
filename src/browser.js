@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CDPClient } from './cdp.js';
 import { ConsoleBuffer } from './console-buffer.js';
-import { ERRORS } from './utils.js';
+import { ERRORS, isWebmcpEnabled } from './utils.js';
 import { SHIM_MODES, SHIM_SOURCES } from './webgl.js';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -78,6 +78,11 @@ export class Browser {
     // re-registered after a reconnect or a crash restart — the CDP registration
     // itself does not survive either.
     this.webglShim = null;
+    // WebMCP: null = not probed yet, true/false = CDP `WebMCP` domain usable.
+    // The live tool catalog is maintained from WebMCP.toolsAdded/toolsRemoved
+    // and cleared on main-frame navigation (tools belong to the document).
+    this.webmcpAvailable = null;
+    this.webmcpTools = new Map();
     // Set by a crash restart; the first tool call afterwards reports it so the
     // client knows the old page state is gone.
     this.sessionReset = false;
@@ -138,6 +143,9 @@ export class Browser {
 
     const args = [
       ...DEFAULT_FLAGS,
+      // Enable Chrome's experimental WebMCP feature (document.modelContext +
+      // the CDP WebMCP domain). Opt-out via ENABLE_WEBMCP=0.
+      ...(isWebmcpEnabled() ? ['--enable-features=WebMCP'] : []),
       `--user-data-dir=${this.profileDir}`,
       'about:blank'
     ];
@@ -245,6 +253,7 @@ export class Browser {
             this._setupDialogHandler();
             await this._reapplyViewport();
             await this._reapplyWebglShim();
+            await this._setupWebmcp();
             return;
           }
         }
@@ -311,8 +320,54 @@ export class Browser {
       if (!params.frame.parentId) {
         this.consoleBuffer.clear();
         process.stderr.write(`[Browser] Console buffer cleared (navigation)\n`);
+        // WebMCP tools belong to the document that registered them.
+        if (this.webmcpTools) this.webmcpTools.clear();
       }
     });
+  }
+
+  /**
+   * Subscribe to the CDP `WebMCP` tool catalog and (best-effort) enable it.
+   * Called from `_connectToPage()` so it covers the initial start, WebSocket
+   * reconnect and crash restart — a CDP event subscription survives neither.
+   * Missing support is expected (older Chromium, or the feature turned off):
+   * we record it and let callers fall back to the in-page document.modelContext
+   * API (see src/webmcp.js).
+   */
+  async _setupWebmcp() {
+    this.webmcpTools = new Map();
+
+    if (!isWebmcpEnabled()) {
+      this.webmcpAvailable = false;
+      return;
+    }
+
+    this.cdp.on('WebMCP.toolsAdded', (params) => {
+      const tools = params && params.tools;
+      if (!Array.isArray(tools)) return;
+      for (const tool of tools) {
+        if (!tool || !tool.name) continue;
+        this.webmcpTools.set(`${tool.frameId || ''}|${tool.name}`, tool);
+      }
+    });
+
+    this.cdp.on('WebMCP.toolsRemoved', (params) => {
+      const tools = params && params.tools;
+      if (!Array.isArray(tools)) return;
+      for (const tool of tools) {
+        if (!tool || !tool.name) continue;
+        this.webmcpTools.delete(`${tool.frameId || ''}|${tool.name}`);
+      }
+    });
+
+    try {
+      await this.cdp.send('WebMCP.enable', {}, 5000);
+      this.webmcpAvailable = true;
+      process.stderr.write('[Browser] WebMCP domain enabled\n');
+    } catch (err) {
+      this.webmcpAvailable = false;
+      process.stderr.write(`[Browser] WebMCP domain unavailable: ${err.message}\n`);
+    }
   }
 
   _setupDialogHandler() {

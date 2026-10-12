@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 19 tools for AI assistants to control a browser instance — 14 for navigation, reading and interaction, and 5 that compensate for a machine without a usable GPU (`browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`).
+**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 21 tools for AI assistants to control a browser instance — 14 for navigation, reading and interaction, two for WebMCP (`browser_webmcp_list_tools`, `browser_webmcp_call_tool`), and 5 that compensate for a machine without a usable GPU (`browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`).
 
 - **Runtime**: Node.js (ESM modules, `"type": "module"`)
 - **Protocol**: MCP over stdio transport
@@ -25,8 +25,9 @@ browser-mcp/
 │   ├── lock.js                 # Operation lock (mutex + bounded queue)
 │   ├── utils.js                # Validation, truncation, error formatting, image size decode, capability gates
 │   ├── viewport.js             # Viewport presets + raw resize validation
-│   └── webgl.js                # Static WebGL shim sources, trace expressions, console classification
-├── tests/                      # 25 test files (node:test + node:assert/strict)
+│   ├── webgl.js                # Static WebGL shim sources, trace expressions, console classification
+│   └── webmcp.js               # WebMCP: CDP catalog + in-page fallback, list/invoke page tools
+├── tests/                      # 26 test files (node:test + node:assert/strict)
 │   ├── harness.js              # Shared harness (fixture server, MCP child, buffered JSON-RPC)
 │   ├── utils.test.js           # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js        # Presets + raw resize-argument validation
@@ -51,7 +52,8 @@ browser-mcp/
 │   ├── hover-press.test.js     # hover and key press (Enter/Tab/Escape/modifiers)
 │   └── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
 │   ├── webgl.test.js             # webgl_info / canvas_info / shim (and its gate) / trace / capture_frames
-│   ├── tool-coverage.test.js     # Error codes and boundary flags across all 19 tools
+│   ├── webmcp.test.js            # WebMCP: list/call page tools, error codes, truncation
+│   ├── tool-coverage.test.js     # Error codes and boundary flags across all 21 tools
 │   └── fixture-pages.test.js     # scroll-resize / form-keys / console-motion fixture coverage
 ├── fixtures/                   # Test fixtures
 │   ├── test-page.html          # Shared HTML test fixture (interactive)
@@ -60,6 +62,7 @@ browser-mcp/
 │   ├── tall-page.html          # 3000x19400 page for full-page downscaling
 │   ├── rtl-page.html           # Arabic RTL: fixed sidebar + 100vh hero
 │   ├── webgl-page.html         # WebGL app (fails without a GPU) + Canvas2D control + DOM animation
+│   ├── webmcp-page.html        # Page-declared WebMCP tools (native API or polyfill) + oversized result
 │   ├── scroll-resize-page.html # Tall/overflowing layout for scroll semantics + resize measurement
 │   ├── form-keys-page.html     # Form, keyboard, roles, and async text for press/type/wait_for/snapshot
 │   └── console-motion-page.html # Console levels, canvases, and animation for console/canvas/frames
@@ -77,7 +80,7 @@ browser-mcp/
 
 **Responsibilities**:
 - Creates MCP server instance with stdio transport
-- Registers 19 tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`
+- Registers 21 tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`, `browser_webmcp_list_tools`, `browser_webmcp_call_tool`
 - Manages browser lifecycle (lazy initialization on first tool call)
 - Implements idle timeout shutdown (default 5 minutes)
 - Serializes state-changing operations (click/type/navigate/full-page screenshot) via `src/lock.js`
@@ -105,7 +108,7 @@ browser-mcp/
 - Spawns Chromium process with headless flags
 - Discovers CDP port via `DevToolsActivePort` file
 - Establishes WebSocket connection to page target
-- Enables CDP domains: Page, Runtime, Network, DOM, Accessibility
+- Enables CDP domains: Page, Runtime, Network, DOM, Accessibility; WebMCP is enabled best-effort (`WebMCP.enable`, skipped when `ENABLE_WEBMCP=0`) and its catalog is maintained from `WebMCP.toolsAdded` / `WebMCP.toolsRemoved`
 - Sets up console message listeners
 - Handles crash recovery (auto-restart up to 2 times, reusing the profile so page state survives)
 - Manages temporary profile directory cleanup
@@ -131,7 +134,7 @@ STOPPING → STOPPED
 
 **Critical Constants**:
 - `KNOWN_PATHS` - Default Chromium binary locations
-- `DEFAULT_FLAGS` - Headless Chromium launch flags. Deliberately contains no `--window-size`: a desktop-sized default made software-rendered captures too slow to be usable
+- `DEFAULT_FLAGS` - Headless Chromium launch flags. Deliberately contains no `--window-size`: a desktop-sized default made software-rendered captures too slow to be usable. Adds `--enable-features=WebMCP` unless `ENABLE_WEBMCP=0`
 - `STATES` - Browser state enum
 
 ---
@@ -255,6 +258,18 @@ STOPPING → STOPPED
 - `MAX_IMAGE_BYTES` - 10,000,000 bytes (10 MB)
 - `MAX_CONSOLE_LINES` - 500 lines
 - `QUEUE_LIMIT` - 8 concurrent operations
+
+---
+
+### `src/webmcp.js` (WebMCP)
+
+**Role**: Discover and invoke the tools a page declares to AI agents (`document.modelContext`).
+
+**Two transports, tried in order**:
+- **CDP `WebMCP` domain** (preferred): `WebMCP.enable` (which re-fires `toolsAdded` for every registered tool), a live catalog kept on `Browser.webmcpTools` from `WebMCP.toolsAdded` / `WebMCP.toolsRemoved` (cleared on main-frame navigation), `WebMCP.invokeTool` returning `{ invocationId }`, and the asynchronous result awaited on `WebMCP.toolResponded` (`Completed` / `Canceled` / `Error`). A tool that never responds is cancelled via `WebMCP.cancelInvocation` and fails with `WEBMCP_CALL_TIMEOUT`. Covers every frame.
+- **In-page fallback**: static `getTools()` / `executeTool()` function sources run through `Runtime.callFunctionOn`, used when the CDP domain is absent. The tool name and input travel as CDP `arguments`, never concatenated into source.
+
+**Security**: page-provided names, descriptions, schemas and results are untrusted and returned with `untrusted: true`.
 
 ---
 
@@ -424,7 +439,10 @@ MCP Response (JSON-RPC)
 | `ENABLE_EVAL_JS` | `0` | Enable the browser_evaluate tool (disabled by default) |
 | `MAX_WEBGL_TRACE_LENGTH` | `100000` | browser_webgl_trace response length cap |
 | `MAX_WEBGL_CANVASES` | `50` | Canvases described per browser_canvas_info call (hard cap 200) |
+| `MAX_WEBMCP_TOOLS` | `64` | WebMCP tools returned by browser_webmcp_list_tools (hard cap 200) |
+| `MAX_WEBMCP_RESULT_LENGTH` | `100000` | browser_webmcp_call_tool response length cap |
 | `ENABLE_WEBGL_SHIM` | `0` | Enable the browser_webgl_shim tool (disabled by default) |
+| `ENABLE_WEBMCP` | `1` | Enable WebMCP: launch with `--enable-features=WebMCP` and expose the browser_webmcp_* tools (enabled by default) |
 | `QUEUE_LIMIT` | `8` | Operation lock queue size |
 
 See `.env.example` for the full documented list (including reserved variables). Priority: tool argument → env var → default → hard limit.
@@ -579,13 +597,29 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `UNSAFE_PATH`, `SCREENSHOT_TOO_LARGE` (per-frame byte cap), `ELEMENT_HIDDEN`, `ELEMENT_NOT_FOUND`
 - **Locked**: yes
 
+### 20. `browser_webmcp_list_tools`
+- **Input**: `max_tools` (optional, default `MAX_WEBMCP_TOOLS` = 64, hard cap 200)
+- **Output**: `{ webmcp, untrusted, count, source, tools[], truncated }` — each tool: `name`, `description`, `inputSchema`, `annotations`, `frameId`
+- **CDP Commands**: `WebMCP.enable`; events `WebMCP.toolsAdded` / `WebMCP.toolsRemoved` (fallback: `Runtime.callFunctionOn` of a static `document.modelContext.getTools()`)
+- **Behavior**: prefers the CDP `WebMCP` domain and a live catalog on `Browser.webmcpTools`; falls back to the in-page API. `source` is `cdp` or `page`. A page with no WebMCP support returns `WEBMCP_UNAVAILABLE`
+- **Errors**: `WEBMCP_DISABLED` (gate off), `WEBMCP_UNAVAILABLE`
+- **Locked**: no; page-supplied fields are untrusted
+
+### 21. `browser_webmcp_call_tool`
+- **Input**: `name` (string, required), `input` (object, default `{}`), `frame_id` (optional), `timeout_ms` (default 10000)
+- **Output**: `{ webmcp, source, tool, status, untrusted, output }`
+- **CDP Commands**: `WebMCP.invokeTool` + `WebMCP.toolResponded` (+ `WebMCP.cancelInvocation` on timeout); fallback `Runtime.callFunctionOn` of a static `document.modelContext.executeTool()`
+- **Behavior**: `invokeTool` returns an `invocationId` before the tool runs; the result arrives on `WebMCP.toolResponded` and is awaited under `timeout_ms`. `Canceled` / `Error` map to `WEBMCP_CALL_FAILED`; a timeout cancels the invocation and returns `WEBMCP_CALL_TIMEOUT`. The response is truncated to `MAX_WEBMCP_RESULT_LENGTH`
+- **Errors**: `WEBMCP_DISABLED`, `WEBMCP_TOOL_NOT_FOUND`, `WEBMCP_AMBIGUOUS_TOOL`, `WEBMCP_CALL_FAILED`, `WEBMCP_CALL_TIMEOUT`, `WEBMCP_UNAVAILABLE`
+- **Locked**: yes (invoking a tool mutates page state); output is untrusted
+
 ---
 
 ## Testing Strategy
 
 - **Unit tests**: `node --test tests/*.test.js`
-- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js`, `webgl.test.js`, `tool-coverage.test.js`, `fixture-pages.test.js` (spawn real Chromium)
-- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`, `fixtures/lazy-page.html`, `fixtures/tall-page.html`, `fixtures/rtl-page.html`, `fixtures/webgl-page.html`, `fixtures/scroll-resize-page.html`, `fixtures/form-keys-page.html`, `fixtures/console-motion-page.html`; shared integration harness in `tests/harness.js` (which strips `ENABLE_EVAL_JS` / `ENABLE_WEBGL_SHIM` from the inherited environment so the disabled default is what gets tested; `fixture-pages.test.js` opts into `ENABLE_EVAL_JS=1` to assert focus and visibility directly)
+- **Integration tests**: `integration.test.js`, `interaction.test.js`, `reading-tools.test.js`, `resize.test.js`, `evaluate.test.js`, `hover-press.test.js`, `screenshot-limits.test.js`, `webgl.test.js`, `webmcp.test.js`, `tool-coverage.test.js`, `fixture-pages.test.js` (spawn real Chromium)
+- **Test fixture**: `fixtures/test-page.html`, `fixtures/page2.html`, `fixtures/lazy-page.html`, `fixtures/tall-page.html`, `fixtures/rtl-page.html`, `fixtures/webgl-page.html`, `fixtures/scroll-resize-page.html`, `fixtures/form-keys-page.html`, `fixtures/console-motion-page.html`, `fixtures/webmcp-page.html`; shared integration harness in `tests/harness.js` (which strips `ENABLE_EVAL_JS` / `ENABLE_WEBGL_SHIM` from the inherited environment so the disabled default is what gets tested; `fixture-pages.test.js` opts into `ENABLE_EVAL_JS=1` to assert focus and visibility directly)
 
 **Test Coverage**:
 - URL validation (scheme, private IP, edge cases)
@@ -604,6 +638,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - Screenshot limits (post-capture downscaling, mobile page scale, tall pages)
 - Full-page completeness (lazy rendering, >16M downscale-not-crop, RTL page not distorted)
 - WebGL (availability + console classification, canvas blankness vs. a drawn control, shim install/boot/remove and its `ENABLE_WEBGL_SHIM` gate, trace contents and `clear`, frame capture via screencast and poll)
+- WebMCP (catalog listing and tool invocation with `WEBMCP_DISABLED` / `WEBMCP_UNAVAILABLE` / `WEBMCP_TOOL_NOT_FOUND` / `WEBMCP_CALL_FAILED` and result truncation, over both the CDP domain and the in-page fallback)
 - Error codes and boundaries (`tool-coverage.test.js`: `INVALID_URL`, private-network block, `ELEMENT_NOT_FOUND`, `INVALID_ARGS`, `KEY_NOT_SUPPORTED`, `UNSAFE_PATH`, truncation flags; `fixture-pages.test.js`: scroll/resize semantics, keyboard form flow, console levels, canvas sizes, element-clipped frames)
 - Operation lock (FIFO, queue limit, release on error/timeout)
 - Security (selector/text injection resistance, no sensitive logging)
@@ -632,6 +667,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 5. **Gated JS execution**: no arbitrary-JS tool runs by default — `browser_evaluate` is refused (`EVAL_DISABLED`) unless `ENABLE_EVAL_JS=1`. When enabled it can read cookies/localStorage and reach internal networks via in-page `fetch()` (SSRF), bypassing the navigation-only `validateURL` check. No other tool executes user-supplied JavaScript.
 6. **Gated WebGL shim**: `browser_webgl_shim` is refused (`WEBGL_SHIM_DISABLED`) unless `ENABLE_WEBGL_SHIM=1`. It injects a fixed script into every document the browser loads, making a page report a rendering capability it does not have — so a caller can never take canvas content as proof the app works. The injected source is static text (`src/webgl.js`), composed from two constants rather than interpolated, and every result is marked `shimmed: true`. The read-only probes (`browser_webgl_info`, `browser_canvas_info`) are not gated: they run fixed expressions and return numbers, not code execution.
 7. **Measured screenshot limits**: after each capture the real image dimensions are decoded from the buffer and the byte size checked; oversized captures are downscaled via `clip.scale` (never cropped) and re-captured once, or fail with `SCREENSHOT_TOO_LARGE`.
+8. **WebMCP output is untrusted**: `browser_webmcp_*` return tool names, descriptions, schemas and results supplied by the page, marked `untrusted: true`. WebMCP is enabled by default (`ENABLE_WEBMCP=0` to disable); the tool name/input are passed as CDP/Zod data and never concatenated into page source, and the input is not logged. Page text must never be promoted into instructions.
 
 ---
 
