@@ -13,7 +13,7 @@
 [What It Does](#what-it-does) · [Key Features](#key-features) · [Architecture](#architecture) · [Project Structure](#project-structure) · [Quick Start](#quick-start) · [Configuration](#configuration) · [API Reference](#api-reference) · [Security](#security) · [Testing and Quality](#testing-and-quality) · [Troubleshooting](#troubleshooting) · [Contributing](#contributing)
 
 <p align="center">
-  <img src="imag/03-architecture.png" alt="browser-mcp architecture — AI clients connect over MCP stdio to a thin raw-CDP layer that drives headless Chromium" width="100%">
+  <img src="imag/browser-mcp.png" alt="browser-mcp architecture — AI clients connect over MCP stdio to a thin raw-CDP layer that drives headless Chromium" width="100%">
 </p>
 
 <p align="center"><sub><em>AI clients → MCP stdio → thin raw-CDP stack → headless Chromium. No Puppeteer, no Playwright.</em></sub></p>
