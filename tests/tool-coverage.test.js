@@ -96,6 +96,18 @@ describe('tool coverage — error codes and boundary flags', () => {
     assert.equal(tiny.truncated, true);
   });
 
+  it('browser_select surfaces ELEMENT_NOT_SELECT and OPTION_NOT_FOUND', async () => {
+    assertSuccess(await call('browser_navigate', { url: `${origin}/` }, 60000));
+
+    const notSelect = await call('browser_select', { selector: '#text-input', value: 'option1' });
+    assert.equal(notSelect.result.isError, true);
+    assert.match(resultText(notSelect), /ELEMENT_NOT_SELECT/);
+
+    const noOption = await call('browser_select', { selector: '#select', value: 'nope-xyz' });
+    assert.equal(noOption.result.isError, true);
+    assert.match(resultText(noOption), /OPTION_NOT_FOUND/);
+  });
+
   it('browser_wait_for rejects empty args with INVALID_ARGS and times out', async () => {
     const empty = await call('browser_wait_for', { timeout_ms: 1000 });
     assert.equal(empty.result.isError, true);

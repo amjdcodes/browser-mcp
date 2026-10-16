@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Fixture</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 16px; }
+        #net-done { padding: 8px 12px; background: #e8f4e8; border: 1px dashed #4a9; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h1>Network Fixture</h1>
+    <p id="net-done">running</p>
+
+    <!-- A subresource that 404s: exercises a non-document request type. -->
+    <img src="/does-not-exist.png" alt="missing" width="20" height="20">
+
+    <script>
+        // Every request below is issued by the PAGE (not the navigation URL), so
+        // it lands in the network buffer after load. The token travels in a query
+        // string on purpose: the test asserts it never reaches stderr while the
+        // request itself is still recorded.
+        window.__netResults = [];
+
+        function record(label, promise) {
+            return promise.then(
+                r => window.__netResults.push(label + '=' + r.status),
+                e => window.__netResults.push(label + '=ERR:' + e.message)
+            );
+        }
+
+        var tasks = [
+            // Success (the fixture server serves page2.html with 200).
+            record('ok', fetch('/page2.html')),
+            // HTTP failure: the fixture server answers 404 for unknown paths.
+            record('http404', fetch('/api/missing-thing')),
+            // Network-level failure: nothing listens on port 9.
+            record('neterr', fetch('http://127.0.0.1:9/')),
+            // Token in the query string (privacy check).
+            record('token', fetch('/api/x?token=SECRET123'))
+        ];
+
+        Promise.allSettled(tasks).then(function () {
+            var el = document.getElementById('net-done');
+            el.id = 'net-done';
+            el.textContent = 'done';
+        });
+    </script>
+</body>
+</html>

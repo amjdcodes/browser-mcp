@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-stdio%20JSON--RPC-blue)
 ![Chromium](https://img.shields.io/badge/Chromium-150.0.7871.100-4285F4?logo=googlechrome&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-aarch64%20%C2%B7%20x86__64-lightgrey)
-![Tests](https://img.shields.io/badge/tests-310%20(node%3Atest)-blue)
+![Tests](https://img.shields.io/badge/tests-327%20(node%3Atest)-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 # browser-mcp
@@ -24,7 +24,7 @@
 
 `browser-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives an AI client — Codex CLI, Claude Code, opencode, or any MCP-capable host — a real browser it can read from and interact with. It implements the protocol over stdio and controls headless Chromium directly through the Chrome DevTools Protocol (CDP) WebSocket, so there is no Puppeteer/Playwright layer to install, pin, or fight with.
 
-The server exposes twenty-one tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`, `browser_webmcp_list_tools`, and `browser_webmcp_call_tool`. Together they cover the common agent loop — open a page, snapshot the interactive elements, resize the viewport, click and type, hover and press keys, wait for state to change, evaluate page JavaScript, find out where the page ended up, and capture the result as an image or text.
+The server exposes twenty-three tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_network`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_select`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`, `browser_webmcp_list_tools`, and `browser_webmcp_call_tool`. Together they cover the common agent loop — open a page, snapshot the interactive elements, resize the viewport, click and type (or pick a `<select>` option), hover and press keys, watch the console and network activity, wait for state to change, evaluate page JavaScript, find out where the page ended up, and capture the result as an image or text.
 
 The last five close a gap that has nothing to do with the agent loop: on a machine with no usable GPU, WebGL silently does not exist (`getContext('webgl')` returns `null` with no exception), so a WebGL-dependent app boots broken and looks like a CSS or layout bug. `browser_webgl_info` reports the real reason, `browser_webgl_shim` lets the app boot anyway, `browser_webgl_trace` reports what it tried to draw, `browser_canvas_info` distinguishes an empty canvas from an unrasterizable one, and `browser_capture_frames` captures motion that a single screenshot misses.
 
@@ -38,7 +38,7 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ## Key Features
 
-- **Twenty-one browser tools over MCP stdio** — navigation, current-URL lookup, text extraction, screenshots, console capture, accessibility snapshots, clicks, typing, waiting, scrolling, viewport resizing, JavaScript evaluation, hovering, key presses, plus WebGL diagnostics, a WebGL stand-in, call tracing, canvas inspection, frame capture, and WebMCP tool discovery + invocation.
+- **Twenty-three browser tools over MCP stdio** — navigation, current-URL lookup, text extraction, screenshots, console capture, network activity, accessibility snapshots, clicks, typing, `<select>` option picking, waiting, scrolling, viewport resizing, JavaScript evaluation, hovering, key presses, plus WebGL diagnostics, a WebGL stand-in, call tracing, canvas inspection, frame capture, and WebMCP tool discovery + invocation.
 - **Raw CDP, zero browser-framework dependencies** — only `@modelcontextprotocol/sdk`, `ws`, and `zod`; no Puppeteer or Playwright.
 - **ARM64-native** — developed and verified on aarch64 (see [Tested Versions](#tested-versions)).
 - **Lazy browser start** — Chromium launches on the first tool call, not at server startup.
@@ -50,6 +50,8 @@ Use it when you want browser automation available to an AI assistant without bun
 - **Measured screenshot limits** — the real PNG/JPEG dimensions are decoded from the captured buffer and the byte size checked; oversized captures are downscaled via `clip.scale` (never cropped) and re-captured once, catching `mobile: true` page-scale inflation the pre-capture estimate misses.
 - **Gated JavaScript evaluation** — `browser_evaluate` is disabled by default and refused with `EVAL_DISABLED` unless `ENABLE_EVAL_JS=1`; results are serialized in-page (cycles, DOM, functions, Map/Set, BigInt) and truncated to `MAX_EVAL_LENGTH`. `browser_snapshot` advertises the gate as `evaluateEnabled`, so the state is discoverable without a failed call.
 - **Keyboard and hover control** — `browser_press` resolves named keys and characters (`src/keymap.js`) and fires default actions (form submit, focus traversal); `browser_hover` moves the real mouse and reports `matchesHover`.
+- **Native `<select>` handling** — `browser_select` chooses an option by exactly one of `value` / `label` / `index` (validated on the raw arguments, so defaults stay distinguishable), then dispatches `input` + `change` so framework listeners observe the selection.
+- **Network activity capture** — `browser_network` reports the requests the page made (method, URL, status, network failure) from permanent `Network.*` listeners, with a `failed`-only filter (`HTTP ≥ 400` or a network-level error) and a `clear_after` option. URLs are never written to logs (they may carry tokens).
 - **WebGL diagnostics on a GPU-less machine** — `browser_webgl_info` reports whether a context can be created (`real` / `shimmed` / `unavailable`), why not, and classifies the console output of three.js, Babylon, PixiJS, Mapbox/MapLibre and PlayCanvas. `browser_canvas_info` measures each canvas's pixels so an empty canvas is distinguishable from an unrasterizable one.
 - **Opt-in WebGL stand-in** — `browser_webgl_shim` installs a software WebGL context before page scripts run, so an app that requires WebGL boots instead of throwing. Gated behind `ENABLE_WEBGL_SHIM` (off by default), registered on the browser so it survives a reconnect or crash restart, and every result is marked `shimmed: true` — it records and reports, it never rasterizes.
 - **Bounded WebGL tracing** — `browser_webgl_trace` returns the shader sources, uniform traffic and draw-call counts the shim recorded (400-record ring, capped lists), which is the structural substitute for pixels this environment cannot produce.
@@ -75,7 +77,7 @@ Use it when you want browser automation available to an AI assistant without bun
                                    ▼
   ┌───────────────────────────────────────────────────────────────┐
   │  Protocol / Interface       index.js                          │
-  │  MCP server · 21 tool handlers · result + image content       │
+  │  MCP server · 23 tool handlers · result + image content       │
   └───────────────────────────────┬───────────────────────────────┘
                                   ▼
   ┌───────────────────────────────────────────────────────────────┐
@@ -100,7 +102,7 @@ Use it when you want browser automation available to an AI assistant without bun
 
 | Layer | Responsibility | Key Components |
 |-------|---------------|----------------|
-| Protocol / Interface | Speak MCP over stdio and expose the twenty-one tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
+| Protocol / Interface | Speak MCP over stdio and expose the twenty-three tools | `index.js` (`McpServer`, `StdioServerTransport`, tool registrations) |
 | Orchestration | Serialize state-changing work, track activity, coordinate navigation, shut down when idle | `OperationLock` / `withLock`, `withActivityTracking`, `resetIdleTimer`, `navigationPromise`, `ensureBrowserReady` |
 | Service / Engine | Drive Chromium, correlate CDP traffic, run in-page helpers, buffer console output, validate input | `Browser`, `CDPClient`, `helpers.js` runners + `IN_PAGE` functions, `webgl.js` shim sources, `webmcp.js` (WebMCP catalog + calls), `ConsoleBuffer`, `utils.js` |
 | Infrastructure | Own the browser process, WebSocket, temp profile, screenshot files, and versioned diagnostics | Chromium child process, `DevToolsActivePort`, profile dir under `tmpdir()`, `OUTPUT_DIR`, stderr |
@@ -120,7 +122,7 @@ Use it when you want browser automation available to an AI assistant without bun
 
 ```
 browser-mcp/
-├── index.js                  # MCP server entry point: 21 tool registrations, lock, idle timer
+├── index.js                  # MCP server entry point: 23 tool registrations, lock, idle timer
 ├── src/
 │   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, crash restart (profile kept), cleanup
 │   ├── cdp.js                # Raw CDP WebSocket client (request/response correlation, events)
@@ -131,8 +133,9 @@ browser-mcp/
 │   ├── viewport.js           # Viewport presets + raw resize-argument validation
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
+│   ├── network-buffer.js     # In-memory ring buffer for network activity (requests/status/failure)
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, capability gates, CONFIG
-├── tests/                    # 310 tests across 26 files (node:test + node:assert/strict)
+├── tests/                    # 327 tests across 28 files (node:test + node:assert/strict)
 │   ├── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
 │   ├── utils.test.js         # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js      # viewport.js presets and raw-argument validation
@@ -149,6 +152,7 @@ browser-mcp/
 │   ├── integration.test.js   # End-to-end navigation/reading + full-page pixel checks
 │   ├── reading-tools.test.js # get_url / get_text / get_console / snapshot / screenshot
 │   ├── interaction.test.js   # click / type / wait_for / scroll
+│   ├── select.test.js        # select: value/label/index, change event, error codes
 │   ├── resize.test.js        # resize: explicit/presets/reset, measured values, full_page survival
 │   ├── evaluate.test.js      # evaluate: gate, primitives, DOM, cycles, promises, exceptions
 │   ├── hover-press.test.js   # hover and key press (Enter/Tab/Escape/modifiers)
@@ -158,7 +162,8 @@ browser-mcp/
 │   ├── cleanup.test.js       # Process and profile cleanup, orphan reaping, no leaks
 │   └── webgl.test.js         # webgl_info / canvas_info / shim (and its gate) / trace / capture_frames
 │   ├── webmcp.test.js        # WebMCP: list/call page tools, error codes, truncation
-│   ├── tool-coverage.test.js   # Error codes and boundary flags across all 21 tools
+│   ├── network.test.js       # network: recording, failed filter, clear, navigation reset, truncation
+│   ├── tool-coverage.test.js   # Error codes and boundary flags across all 23 tools
 │   └── fixture-pages.test.js   # scroll-resize / form-keys / console-motion fixture coverage
 ├── fixtures/                 # Test HTML pages
 │   ├── test-page.html        # Shared interactive fixture
@@ -168,6 +173,7 @@ browser-mcp/
 │   ├── rtl-page.html         # Arabic RTL: fixed sidebar + 100vh hero
 │   └── webgl-page.html       # WebGL app (fails without a GPU) + Canvas2D control + DOM animation
 │   ├── webmcp-page.html      # Page-declared WebMCP tools (native API or polyfill) + oversized result
+│   ├── network-page.html     # Success/404/network-failure/token requests for browser_network
 │   ├── scroll-resize-page.html # Tall/overflowing layout for scroll semantics + resize measurement
 │   ├── form-keys-page.html     # Form, keyboard, roles, and async text for press/type/wait_for/snapshot
 │   └── console-motion-page.html # Console levels, canvases, and animation for console/canvas/frames
@@ -300,6 +306,8 @@ Priority (highest wins): **tool argument → environment variable → default �
 | `MAX_TEXT_LENGTH` | No | `1000000` | Maximum characters returned by `browser_get_text` before truncation. |
 | `MAX_CONSOLE_MESSAGES` | No | `500` | Size of the in-memory console ring buffer. |
 | `MAX_CONSOLE_LINES` | No | `500` | Maximum lines returned by `browser_get_console`. |
+| `MAX_NETWORK_REQUESTS` | No | `200` | Size of the in-memory network activity ring buffer (finished requests; pending entries are evicted past the same cap). |
+| `MAX_NETWORK_LINES` | No | `200` | Maximum requests returned by `browser_network`. |
 | `MAX_SNAPSHOT_ITEMS` | No | `100` | Default item count for `browser_snapshot` (hard cap `200`). |
 | `MAX_SCREENSHOT_PIXELS` | No | `16000000` | Maximum screenshot area before auto-downscaling (16M ≈ 4000×4000). |
 | `MAX_IMAGE_BYTES` | No | `10000000` | Maximum image payload bytes accepted in a response. Also enforced on screenshots by post-capture measurement. |
@@ -327,9 +335,11 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 | `browser_get_text` | reading | — | Read body text or a specific element |
 | `browser_screenshot` | reading / state-changing | ✅ when `full_page` | Capture the viewport or the full page |
 | `browser_get_console` | reading | — | Read buffered console messages |
+| `browser_network` | reading | — | Read recorded network activity (requests, statuses, failures) |
 | `browser_snapshot` | reading | — | Accessibility snapshot of interactive elements |
 | `browser_click` | state-changing | ✅ | Real mouse click at a computed point |
 | `browser_type` | state-changing | ✅ | Type into input/textarea/contenteditable |
+| `browser_select` | state-changing | ✅ | Pick a `<select>` option by value, label, or index |
 | `browser_wait_for` | reading | — | Wait for an element and/or text |
 | `browser_scroll` | reading | — | Scroll by direction, element, or coordinates |
 | `browser_resize` | state-changing | ✅ | Resize the viewport (preset, explicit size, or reset) |
@@ -401,10 +411,22 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 - **Returns**: `{ messages, count, cleared, truncated, droppedCount }`
 - **Behavior**: ring buffer populated by `Runtime.consoleAPICalled` (with `Runtime.exceptionThrown` recorded as errors); the buffer clears on each main-frame navigation
 
+### browser_network
+
+- **Params**: `filter` (`all`|`failed`, default `all`), `clear_after` (boolean, default false)
+- **Returns**: `{ requests, count, failedCount, cleared, truncated, droppedCount }` — each request carries `method`, `url`, `resourceType`, `status`, `mimeType`, `failure`, `canceled`, and `completed`
+- **Behavior**: records the requests the page made from the permanent `Network.*` listeners (`requestWillBeSent` → `responseReceived`/`loadingFinished`/`loadingFailed`), with `filter: "failed"` keeping HTTP ≥ 400 or network-level failures. `count` is the number of entries matching `filter`; `failedCount` is always the failing count of the whole record. The record clears on each main-frame navigation, is bounded by `MAX_NETWORK_REQUESTS`, truncated to `MAX_NETWORK_LINES`, and pending entries are evicted if their finish/fail event never arrives
+- **Errors**: none of its own — a normal JSON-RPC failure is reported as a generic error
+- **Read-only**, not locked. **URLs are never written to stderr** (a query string may carry a token)
+
+```json
+{ "name": "browser_network", "arguments": { "filter": "failed" } }
+```
+
 ### browser_snapshot
 
 - **Params**: `include_text` (boolean, default true), `max_items` (≤ 200, default 100)
-- **Returns**: `{ elements, count, truncated, evaluateEnabled }` — each element carries `role`, `name`, `description`, a best-effort CSS `selector`, and `state` flags (`checked`, `expanded`, `disabled`, `selected`, `readonly`, `required`); `evaluateEnabled` tells you whether `browser_evaluate` is usable in this server
+- **Returns**: `{ elements, count, truncated, evaluateEnabled, webmcpEnabled, webmcpAvailable }` — each element carries `role`, `name`, `description`, a best-effort CSS `selector`, and `state` flags (`checked`, `expanded`, `disabled`, `selected`, `readonly`, `required`); `evaluateEnabled` tells you whether `browser_evaluate` is usable in this server, while `webmcpEnabled` is the `ENABLE_WEBMCP` gate and `webmcpAvailable` the runtime probe for whether the current page/browser exposes WebMCP at all
 - **Behavior**: walks the accessibility tree for interactive roles, resolves selectors via `DOM.describeNode` with a `Runtime.evaluate` fallback, and returns selectors ready to pass to the interaction tools
 
 ### browser_click
@@ -422,6 +444,15 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 - **Behavior**: works on `input`, `textarea`, and `contenteditable`; types character-by-character with per-character `input` events and a final `change` event. Uses the native value setter so React-style value trackers observe changes, and `execCommand('insertText')` for contenteditable. Arabic/RTL, Chinese, emoji, and special characters are verified
 - **Errors**: `ELEMENT_NOT_FOUND`, `ELEMENT_NOT_TYPEABLE`
 - **Security**: the typed `text` is **never** written to logs (only its length)
+- **Locked**
+
+### browser_select
+
+- **Params**: `selector` (required), and **exactly one** of `value` / `label` / `index` (0-based), `timeout_ms` (default 10000)
+- **Returns**: `{ selected: true, selector, value, label, index }` — the resolved option
+- **Behavior**: waits for the element, confirms it is visible, then verifies it is a `<select>` and sets the matching option, dispatching `input` + `change` so framework listeners observe the selection. Validation runs on the raw arguments, so "provided" and "defaulted" stay distinguishable (`INVALID_ARGS` when zero or more than one of the three is given)
+- **Errors**: `INVALID_ARGS` (zero or multiple criteria), `ELEMENT_NOT_SELECT` (element is not a `<select>`), `OPTION_NOT_FOUND`, `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Security**: only the selector is logged — the value/label are never written to logs (they may be sensitive)
 - **Locked**
 
 ### browser_wait_for
@@ -588,6 +619,8 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 | `ELEMENT_HIDDEN` | Element exists but is hidden or zero-sized |
 | `ELEMENT_NOT_CLICKABLE` | Element is covered by an overlay and `force` was not set |
 | `ELEMENT_NOT_TYPEABLE` | Element is not an input, textarea, or contenteditable |
+| `ELEMENT_NOT_SELECT` | `browser_select` target is not a `<select>` element |
+| `OPTION_NOT_FOUND` | No `<select>` option matched the given `value`/`label`/`index` |
 | `KEY_NOT_SUPPORTED` | `browser_press` key is not a known named key or single character |
 | `EVAL_DISABLED` | `browser_evaluate` called while `ENABLE_EVAL_JS` is off |
 | `EVAL_ERROR` | JavaScript threw inside the page (message includes the exception) |
@@ -630,7 +663,7 @@ Base transport: **MCP stdio**. Every tool returns MCP text content containing JS
 ## Testing and Quality
 
 ```bash
-# Run the full suite (310 tests across 26 files)
+# Run the full suite (327 tests across 28 files)
 npm test
 
 # Run a single test file
@@ -646,7 +679,7 @@ Coverage spans:
 
 - **Unit**: URL/path validation, truncation and limits, viewport argument resolution, key resolution/modifier bitmasks, image-size decoding, eval gate, CDP request/response correlation, operation-lock behavior, in-page helper security
 - **Browser lifecycle**: launch, crash + restart (profile reused, contents preserved, `sessionReset` reported once), WebSocket reconnect, lazy start, idle shutdown, cleanup with no leaked processes and orphan reaping
-- **Tool integration**: reading tools (incl. `get_url` across a hash navigation), interaction tools (click/type/wait_for/scroll), scroll semantics (single-axis, `inViewport` vs `fullyInViewport`), resize (presets, measured values + overflow warning, persistence, full-page survival), evaluate (gate advertised in snapshot, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot filename resolution and limit enforcement, full-page completeness on lazy/RTL/tall pages, parallel instances and lock serialization
+- **Tool integration**: reading tools (incl. `get_url` across a hash navigation), interaction tools (click/type/wait_for/scroll), `<select>` picking by value/label/index with a `change` event and its error codes, network capture (recording, `failed` filter, `clear_after`, navigation reset, truncation), scroll semantics (single-axis, `inViewport` vs `fullyInViewport`), resize (presets, measured values + overflow warning, persistence, full-page survival), evaluate (gate advertised in snapshot, DOM, cycles, promises, exceptions, truncation), hover/press, screenshot filename resolution and limit enforcement, full-page completeness on lazy/RTL/tall pages, parallel instances and lock serialization
 - **WebGL**: availability reporting and console classification, canvas blankness vs. a drawn control canvas, the shim's install/boot/remove cycle and its `ENABLE_WEBGL_SHIM` gate, shader/uniform/draw-call tracing and `clear`, and frame capture over both the screencast stream and polling with an element clip
 - **WebMCP**: catalog listing and tool invocation with the documented error codes (`WEBMCP_DISABLED`, `WEBMCP_UNAVAILABLE`, `WEBMCP_TOOL_NOT_FOUND`, `WEBMCP_CALL_FAILED`) and result truncation, over both the CDP domain and the in-page fallback; integration-verified against Chromium 150 (the CDP `WebMCP` domain is present)
 - **Error codes and boundaries**: documented failure paths for every tool (`INVALID_URL`, private-network block, `ELEMENT_NOT_FOUND`, `INVALID_ARGS`, `KEY_NOT_SUPPORTED`, `UNSAFE_PATH`, truncation flags), exercised against three purpose-built fixtures (scroll-resize, form-keys, console-motion)

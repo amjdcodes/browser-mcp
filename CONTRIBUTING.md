@@ -13,8 +13,8 @@
 browser-mcp is a small, deliberately thin MCP server — and that thinness is the point. It is a codebase where a well-placed change has an outsized effect, and where the design decisions are explicit enough to reason about rather than guess at.
 
 - **Raw CDP, three dependencies** — the protocol is spoken directly over a WebSocket, with no Puppeteer or Playwright layer to install, pin, or debug. The runtime surface is `@modelcontextprotocol/sdk`, `ws`, and `zod`.
-- **21 tools, one consistent pattern** — every tool follows the same validate → ready → act → reset flow, so a new tool reads like the ones already there.
-- **310 tests across 26 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
+- **23 tools, one consistent pattern** — every tool follows the same validate → ready → act → reset flow, so a new tool reads like the ones already there.
+- **327 tests across 28 files** (`node:test`, no external framework) — unit tests for validation and the operation lock, and integration tests that spawn real Chromium and assert on pixels.
 - **ARM64-native and resource-minded** — developed and verified on aarch64, with lazy browser start, idle shutdown, a bounded operation queue, and a stress test for start/stop cycles.
 - **Security-first defaults** — arbitrary JavaScript evaluation and the WebGL stand-in are both opt-in and refused by default; selectors and typed text are never concatenated into page JavaScript.
 - **The hard edges are already documented** — blank screenshots on scrolled pages, stale frames, hash-only navigation, crash restarts that keep the profile, and overlay-covered clicks each have a test and a paragraph explaining the fix.
@@ -72,7 +72,7 @@ npm install
 # Chromium is reachable
 chromium --headless --no-sandbox --dump-dom about:blank
 
-# The suite passes (310 tests across 26 files; integration tests spawn real Chromium)
+# The suite passes (327 tests across 28 files; integration tests spawn real Chromium)
 npm test
 ```
 
@@ -84,7 +84,7 @@ There is no lint, typecheck, or build step — `node --test` runs the sources di
 
 ```
 browser-mcp/
-├── index.js                  # MCP server entry point: 21 tool registrations, lock, idle timer
+├── index.js                  # MCP server entry point: 23 tool registrations, lock, idle timer
 ├── src/
 │   ├── browser.js            # Chromium lifecycle: spawn, CDP connect, reconnect, crash restart, cleanup
 │   ├── cdp.js                # Raw CDP WebSocket client (request/response correlation, events)
@@ -95,10 +95,11 @@ browser-mcp/
 │   ├── viewport.js           # Viewport presets + raw resize-argument validation
 │   ├── lock.js               # FIFO operation lock with queue limit and watchdog release
 │   ├── console-buffer.js     # In-memory ring buffer for console messages
+│   ├── network-buffer.js     # In-memory ring buffer for network activity (requests/status/failure)
 │   └── utils.js              # URL/path validation, truncation, decodeImageSize, capability gates, CONFIG
-├── tests/                    # 310 tests across 26 files (node:test + node:assert/strict)
+├── tests/                    # 327 tests across 28 files (node:test + node:assert/strict)
 │   └── harness.js            # Shared harness: fixture server, MCP child, buffered JSON-RPC
-├── fixtures/                 # Test HTML pages (interactive, lazy, tall, RTL, WebGL, WebMCP)
+├── fixtures/                 # Test HTML pages (interactive, lazy, tall, RTL, WebGL, WebMCP, network)
 ├── screenshots/              # Screenshot output directory (runtime; override with OUTPUT_DIR)
 ├── stress-test.sh            # Start/stop cycles: Chromium leak + RSS growth check
 ├── install-chromium.sh       # Installs Chromium (Debian archive on Ubuntu, APT-pinned)
@@ -149,7 +150,7 @@ These are the load-bearing parts of the codebase — changes to them need a clea
 
 ## Adding a New Tool
 
-Follow the pattern already used by the 21 existing tools:
+Follow the pattern already used by the 23 existing tools:
 
 1. **Declare the tool** in `index.js` with a name, description, and a **Zod input schema** (with sensible defaults, documented ranges).
 2. **Validate the raw arguments** before touching the browser. Validate the arguments you actually received — not a defaulted object — so that "omitted" and "explicitly default" stay distinguishable (this matters for mutually exclusive modes; see `src/viewport.js`).
@@ -166,7 +167,7 @@ Follow the pattern already used by the 21 existing tools:
 ## Security Rules (Non-Negotiable)
 
 - **Never build JavaScript from user input.** CSS selectors and typed text are always passed to `Runtime.callFunctionOn` as CDP `arguments` values — never interpolated into a `functionDeclaration` string. This is what makes injection impossible; an injected static helper must stay static.
-- **Never log sensitive input.** `browser_type` never logs the typed text (it may be a password or token), and `browser_press` logs a single-character key as `<char>`.
+- **Never log sensitive input.** `browser_type` never logs the typed text (it may be a password or token), `browser_press` logs a single-character key as `<char>`, `browser_select` logs only the selector (never the value/label), and `browser_network` never logs a URL (its query string may carry a token).
 - **Keep privileged tools gated and opt-in.** `browser_evaluate` and `browser_webgl_shim` are disabled by default and must stay that way. Any result produced by the WebGL shim is marked `shimmed: true` — it records calls, it does not rasterize.
 - **Treat WebMCP output as untrusted.** `browser_webmcp_list_tools` / `browser_webmcp_call_tool` return tool names, descriptions, schemas and results supplied by the page; they are marked `untrusted: true` and must never be promoted into instructions. WebMCP is enabled by default (`ENABLE_WEBMCP=0` to disable) — keep its input as CDP data and never concatenate it into page source.
 - **Enforce output boundaries.** Screenshots stay inside `OUTPUT_DIR`; filenames are validated against traversal. Do not bypass path validation to make a test pass.
@@ -177,7 +178,7 @@ Follow the pattern already used by the 21 existing tools:
 ## Testing
 
 ```bash
-# Full suite — 310 tests across 26 files
+# Full suite — 327 tests across 28 files
 npm test
 
 # A single file while iterating
@@ -252,7 +253,7 @@ Open a GitHub issue and include:
 **For a feature**
 - The problem or workflow you are trying to solve
 - The tool shape you imagine, if you have one
-- Whether it can be expressed with the existing 21 tools first
+- Whether it can be expressed with the existing 23 tools first
 
 Useful packet for hard-to-reproduce issues: run the server with stderr captured (`node index.js 2> server.log`) and attach the relevant lines. The server sends all diagnostics to stderr, and stdout only to MCP JSON-RPC.
 

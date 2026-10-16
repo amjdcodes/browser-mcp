@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CDPClient } from './cdp.js';
 import { ConsoleBuffer } from './console-buffer.js';
+import { NetworkBuffer } from './network-buffer.js';
 import { ERRORS, isWebmcpEnabled } from './utils.js';
 import { SHIM_MODES, SHIM_SOURCES } from './webgl.js';
 
@@ -92,6 +93,10 @@ export class Browser {
     this.maxRestartAttempts = options.maxRestartAttempts ?? 2;
     this._cleanupDone = false;
     this.consoleBuffer = new ConsoleBuffer();
+    // Network activity, recorded by the permanent Network.* listeners wired in
+    // _setupNetworkListeners(). Same lifecycle as the console buffer: cleared on
+    // each main-frame navigation so page-to-page data never leaks.
+    this.networkBuffer = new NetworkBuffer();
   }
 
   findChromiumPath() {
@@ -250,6 +255,7 @@ export class Browser {
 
             await this._enableDomains();
             this._setupConsoleListeners();
+            this._setupNetworkListeners();
             this._setupDialogHandler();
             await this._reapplyViewport();
             await this._reapplyWebglShim();
@@ -322,8 +328,25 @@ export class Browser {
         process.stderr.write(`[Browser] Console buffer cleared (navigation)\n`);
         // WebMCP tools belong to the document that registered them.
         if (this.webmcpTools) this.webmcpTools.clear();
+        // Network activity belongs to the page that produced it — drop it so a
+        // later browser_network call cannot report the previous page's requests.
+        if (this.networkBuffer) this.networkBuffer.clear();
       }
     });
+  }
+
+  /**
+   * Subscribe to the permanent Network domain events so requests issued after
+   * load (fetch/XHR failures) are recorded instead of thrown away. Called from
+   * `_connectToPage()` beside `_setupConsoleListeners()`, so it inherits the
+   * reconnect/crash-restart lifecycle with no extra code. The Network domain is
+   * already enabled in `_enableDomains()`.
+   */
+  _setupNetworkListeners() {
+    this.cdp.on('Network.requestWillBeSent', (params) => this.networkBuffer.start(params));
+    this.cdp.on('Network.responseReceived', (params) => this.networkBuffer.respond(params));
+    this.cdp.on('Network.loadingFailed', (params) => this.networkBuffer.fail(params));
+    this.cdp.on('Network.loadingFinished', (params) => this.networkBuffer.finish(params));
   }
 
   /**

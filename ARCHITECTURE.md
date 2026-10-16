@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 21 tools for AI assistants to control a browser instance — 14 for navigation, reading and interaction, two for WebMCP (`browser_webmcp_list_tools`, `browser_webmcp_call_tool`), and 5 that compensate for a machine without a usable GPU (`browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`).
+**browser-mcp** is an MCP (Model Context Protocol) server that provides headless Chromium browser automation via raw CDP (Chrome DevTools Protocol). It exposes 23 tools for AI assistants to control a browser instance — 16 for navigation, reading and interaction, two for WebMCP (`browser_webmcp_list_tools`, `browser_webmcp_call_tool`), and 5 that compensate for a machine without a usable GPU (`browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`).
 
 - **Runtime**: Node.js (ESM modules, `"type": "module"`)
 - **Protocol**: MCP over stdio transport
@@ -20,6 +20,7 @@ browser-mcp/
 │   ├── browser.js              # Chromium lifecycle + persistent viewport state
 │   ├── cdp.js                  # Raw CDP WebSocket client
 │   ├── console-buffer.js       # In-memory console message buffer
+│   ├── network-buffer.js       # In-memory network activity buffer (requests/status/failure)
 │   ├── helpers.js              # In-page interaction helpers (callFunctionOn)
 │   ├── keymap.js               # Key resolution for browser_press
 │   ├── lock.js                 # Operation lock (mutex + bounded queue)
@@ -27,7 +28,7 @@ browser-mcp/
 │   ├── viewport.js             # Viewport presets + raw resize validation
 │   ├── webgl.js                # Static WebGL shim sources, trace expressions, console classification
 │   └── webmcp.js               # WebMCP: CDP catalog + in-page fallback, list/invoke page tools
-├── tests/                      # 26 test files (node:test + node:assert/strict)
+├── tests/                      # 28 test files (node:test + node:assert/strict)
 │   ├── harness.js              # Shared harness (fixture server, MCP child, buffered JSON-RPC)
 │   ├── utils.test.js           # Validation, truncation, limits, image-size decode, eval gate
 │   ├── viewport.test.js        # Presets + raw resize-argument validation
@@ -47,13 +48,15 @@ browser-mcp/
 │   ├── integration.test.js     # End-to-end navigation/reading + full-page pixel checks
 │   ├── reading-tools.test.js   # get_url / get_text / get_console / snapshot / screenshot
 │   ├── interaction.test.js     # click / type / wait_for / scroll
+│   ├── select.test.js          # select: value/label/index, change event, error codes
 │   ├── resize.test.js          # resize: explicit/presets/reset, measured values, persistence
 │   ├── evaluate.test.js        # evaluate: gate, primitives, DOM, cycles, promises, errors
 │   ├── hover-press.test.js     # hover and key press (Enter/Tab/Escape/modifiers)
 │   └── screenshot-limits.test.js # Post-capture downscaling and limit enforcement
 │   ├── webgl.test.js             # webgl_info / canvas_info / shim (and its gate) / trace / capture_frames
 │   ├── webmcp.test.js            # WebMCP: list/call page tools, error codes, truncation
-│   ├── tool-coverage.test.js     # Error codes and boundary flags across all 21 tools
+│   ├── network.test.js           # network: recording, failed filter, clear, navigation reset, truncation
+│   ├── tool-coverage.test.js     # Error codes and boundary flags across all 23 tools
 │   └── fixture-pages.test.js     # scroll-resize / form-keys / console-motion fixture coverage
 ├── fixtures/                   # Test fixtures
 │   ├── test-page.html          # Shared HTML test fixture (interactive)
@@ -63,6 +66,7 @@ browser-mcp/
 │   ├── rtl-page.html           # Arabic RTL: fixed sidebar + 100vh hero
 │   ├── webgl-page.html         # WebGL app (fails without a GPU) + Canvas2D control + DOM animation
 │   ├── webmcp-page.html        # Page-declared WebMCP tools (native API or polyfill) + oversized result
+│   ├── network-page.html       # Success/404/network-failure/token requests for browser_network
 │   ├── scroll-resize-page.html # Tall/overflowing layout for scroll semantics + resize measurement
 │   ├── form-keys-page.html     # Form, keyboard, roles, and async text for press/type/wait_for/snapshot
 │   └── console-motion-page.html # Console levels, canvases, and animation for console/canvas/frames
@@ -80,7 +84,7 @@ browser-mcp/
 
 **Responsibilities**:
 - Creates MCP server instance with stdio transport
-- Registers 21 tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`, `browser_webmcp_list_tools`, `browser_webmcp_call_tool`
+- Registers 23 tools: `browser_navigate`, `browser_get_url`, `browser_get_text`, `browser_screenshot`, `browser_get_console`, `browser_network`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_select`, `browser_wait_for`, `browser_scroll`, `browser_resize`, `browser_evaluate`, `browser_hover`, `browser_press`, `browser_webgl_info`, `browser_canvas_info`, `browser_webgl_shim`, `browser_webgl_trace`, `browser_capture_frames`, `browser_webmcp_list_tools`, `browser_webmcp_call_tool`
 - Manages browser lifecycle (lazy initialization on first tool call)
 - Implements idle timeout shutdown (default 5 minutes)
 - Serializes state-changing operations (click/type/navigate/full-page screenshot) via `src/lock.js`
@@ -179,6 +183,29 @@ STOPPING → STOPPED
 - `clear()` - Empties buffer (called on navigation)
 - `getMessages(level)` - Returns filtered messages
 - `getFormattedMessages(level, clearAfter)` - Returns truncated, formatted output
+
+---
+
+### `src/network-buffer.js` (Network Buffer)
+
+**Role**: In-memory ring buffer for browser network activity
+
+**Responsibilities**:
+- Tracks requests from `Network.requestWillBeSent` through their end event
+- Attaches the HTTP status (`Network.responseReceived`) and the failure reason (`Network.loadingFailed`)
+- Implements a ring buffer with max capacity (`MAX_NETWORK_REQUESTS`, default 200)
+- Filters by failure (`HTTP >= 400` or a network-level failure)
+- Truncates output (`MAX_NETWORK_LINES`) and clears on main-frame navigation
+
+**Key Methods**:
+- `start(params)` - Begins tracking a request (keyed by `requestId`)
+- `respond(params)` - Records `status`/`mimeType` on the pending entry
+- `fail(params)` - Moves a failed request into the record (`failure`, `canceled`)
+- `finish(params)` - Moves a completed request into the record
+- `getFormatted(filter, clearAfter)` - Returns `{ requests, count, failedCount, cleared, truncated, droppedCount }`
+- `clear()` - Empties both the record and the pending map
+
+**Privacy**: a URL is never written to stderr (it may carry a token in the query).
 
 ---
 
@@ -433,6 +460,8 @@ MCP Response (JSON-RPC)
 | `MAX_IMAGE_BYTES` | `10000000` | Image payload cap |
 | `MAX_CONSOLE_LINES` | `500` | Console output limit |
 | `MAX_CONSOLE_MESSAGES` | `500` | Console ring buffer size |
+| `MAX_NETWORK_REQUESTS` | `200` | Network activity ring buffer size |
+| `MAX_NETWORK_LINES` | `200` | Network activity response limit |
 | `MAX_SNAPSHOT_ITEMS` | `100` | Snapshot default limit |
 | `MAX_SCREENSHOT_PIXELS` | `16000000` | Screenshot area cap |
 | `MAX_EVAL_LENGTH` | `100000` | browser_evaluate expression/result length cap |
@@ -478,13 +507,21 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Output**: `{ messages, count, cleared, truncated, droppedCount }`
 - **Source**: `ConsoleBuffer` (populated by `Runtime.consoleAPICalled` events)
 
-### 5. `browser_snapshot`
+### 5. `browser_network`
+- **Input**: `filter` (`all` | `failed`, optional, default `all`), `clear_after` (optional, default false)
+- **Output**: `{ requests, count, failedCount, cleared, truncated, droppedCount }` — each request: `requestId`, `method`, `url`, `resourceType`, `timestamp`, `status`, `mimeType`, `failure`, `canceled`, `completed`
+- **CDP Commands**: none directly — reads `Browser.networkBuffer`, fed by the permanent `Network.requestWillBeSent` / `Network.responseReceived` / `Network.loadingFailed` / `Network.loadingFinished` listeners wired in `_setupNetworkListeners()`
+- **Behavior**: reports the requests the page made. `filter: 'failed'` keeps HTTP ≥ 400 or a network-level failure (`failure` set / `canceled`). The record clears on each main-frame navigation, is bounded by `MAX_NETWORK_REQUESTS` (pending entries are evicted past the cap so a missing finish/fail event cannot leak) and truncated to `MAX_NETWORK_LINES`
+- **Privacy**: a URL is never written to stderr (it may carry a token in the query)
+- **Locked**: no
+
+### 6. `browser_snapshot`
 - **Input**: `include_text` (boolean), `max_items` (max 200, default 100)
 - **Output**: `{ elements, count, truncated, evaluateEnabled }`
 - **CDP Commands**: `Accessibility.getFullAXTree`, `DOM.describeNode`, `Runtime.evaluate`
 - **Purpose**: Returns interactive elements with selectors for automation. `evaluateEnabled` advertises the `browser_evaluate` gate so a caller can discover it without attempting a call
 
-### 6. `browser_click`
+### 7. `browser_click`
 - **Input**: `selector` (string), `force` (boolean, default false), `timeout_ms` (optional, default 10000, max 120000)
 - **Output**: `{ clicked: true, selector, x, y, forced? }`
 - **CDP Commands**: `Runtime.callFunctionOn` (helpers), `Input.dispatchMouseEvent` (mousemove/mousePressed/mouseReleased)
@@ -492,7 +529,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `ELEMENT_NOT_FOUND` (timeout), `ELEMENT_HIDDEN`, `ELEMENT_NOT_CLICKABLE` (covered, no force), invalid selector → SyntaxError
 - **Locked**: yes (state-changing)
 
-### 7. `browser_type`
+### 8. `browser_type`
 - **Input**: `selector` (string), `text` (string), `clear_first` (boolean, default true), `timeout_ms` (optional, default 10000)
 - **Output**: `{ typed: true, selector, length, finalLength }`
 - **CDP Commands**: `Runtime.callFunctionOn` (focus/clear/type helpers)
@@ -501,7 +538,16 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: yes (state-changing)
 - **Security**: the typed `text` is NEVER logged (may contain passwords/tokens)
 
-### 8. `browser_wait_for`
+### 9. `browser_select`
+- **Input**: `selector` (string, required), and exactly one of `value` / `label` / `index` (0-based), `timeout_ms` (optional, default 10000)
+- **Output**: `{ selected: true, selector, value, label, index }`
+- **CDP Commands**: `Runtime.callFunctionOn` (`IN_PAGE.selectOption`)
+- **Behavior**: waits for the element → visibility → confirms it is a `<select>` → sets the matching option and dispatches `input` + `change` so framework listeners observe it. Validation runs on the RAW args so "provided" and "defaulted" stay distinguishable (the same rationale as `resolveViewportParams`)
+- **Errors**: `INVALID_ARGS` (zero or multiple criteria), `ELEMENT_NOT_SELECT`, `OPTION_NOT_FOUND`, `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
+- **Locked**: yes (state-changing)
+- **Security**: only the selector is logged; the value/label are never written to stderr
+
+### 10. `browser_wait_for`
 - **Input**: `selector` (optional string), `text` (optional string), `timeout_ms` (optional, default 15000, max 120000)
 - **Output**: `{ found: true, selector, text, elapsed_ms }`
 - **CDP Commands**: `Runtime.callFunctionOn` (queryElement, findTextInPage)
@@ -509,7 +555,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `INVALID_ARGS` (neither given), `TIMEOUT`
 - **Locked**: no (read-only polling)
 
-### 9. `browser_scroll`
+### 11. `browser_scroll`
 - **Input**: `direction` (up/down/left/right/top/bottom, optional), `selector` (optional), `x`/`y` (optional, either may be omitted — the omitted axis keeps its position), `pixels` (optional) — exactly one mode required
 - **Output**: `{ scrollX, scrollY, mode, ... }`; element mode adds `selector`, `inViewport` (any part visible) and `fullyInViewport` (all of it fits)
 - **CDP Commands**: `Runtime.callFunctionOn` (scrollByDirection / scrollToPosition / scrollIntoView + isInViewport + isFullyInViewport)
@@ -517,7 +563,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `INVALID_ARGS` (no mode, or conflicting modes), `ELEMENT_NOT_FOUND` (selector mode)
 - **Locked**: no (viewport read/write, not DOM state)
 
-### 10. `browser_resize`
+### 12. `browser_resize`
 - **Input**: `preset` (`mobile`|`tablet`|`desktop`, optional), `width`/`height` (100–10000, optional), `device_scale_factor` (1–4, optional), `mobile` (boolean, optional), `reset` (boolean, optional), `timeout_ms` (optional)
 - **Output**: `{ resized: true, width, height, deviceScaleFactor, mobile, preset, reset, measured, warning? }` — `width`/`height` are the REQUESTED values; `measured` carries the values the page actually has (`innerWidth`/`innerHeight`/`devicePixelRatio`/`scrollX`/`scrollWidth`), and `warning` is present when `innerWidth` differs from the requested width (horizontal overflow or shrink-to-fit)
 - **CDP Commands**: `Emulation.setDeviceMetricsOverride` / `Emulation.clearDeviceMetricsOverride`, `Runtime.evaluate` (measurement)
@@ -525,7 +571,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `INVALID_ARGS`, `VIEWPORT_APPLY_FAILED`
 - **Locked**: yes
 
-### 11. `browser_evaluate`
+### 13. `browser_evaluate`
 - **Input**: `expression` (string, required, ≤ `MAX_EVAL_LENGTH`), `await_promise` (default true), `user_gesture` (default false), `timeout_ms` (default 10000)
 - **Output**: `{ result, type, truncated }`
 - **CDP Commands**: `Runtime.evaluate`, `Runtime.callFunctionOn` (`IN_PAGE.serializeValue`), `Runtime.releaseObject`
@@ -534,7 +580,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: yes (arbitrary JS can mutate the DOM)
 - **Security**: when enabled the page code can read cookies/localStorage and issue `fetch()` to internal networks (SSRF), bypassing the navigation-only `validateURL` check — see the Security Model
 
-### 12. `browser_hover`
+### 14. `browser_hover`
 - **Input**: `selector` (string, required), `timeout_ms` (optional, default 10000)
 - **Output**: `{ hovered: true, selector, x, y, matchesHover }`
 - **CDP Commands**: `Runtime.callFunctionOn` (`isElementVisible`, `scrollIntoView`, `getClickablePoint`, `isHovered`), `Input.dispatchMouseEvent` (`mouseMoved`)
@@ -542,7 +588,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `ELEMENT_NOT_FOUND`, `ELEMENT_HIDDEN`
 - **Locked**: yes (hover can open menus)
 
-### 13. `browser_press`
+### 15. `browser_press`
 - **Input**: `key` (string, required), `modifiers` (`Alt`|`Control`|`Meta`|`Shift`[], default `[]`), `selector` (optional — focused first), `repeat` (1–100, default 1), `timeout_ms` (optional, default 10000)
 - **Output**: `{ pressed: true, key, modifiers, count, selector, focused }`
 - **CDP Commands**: `Input.dispatchKeyEvent` (`keyDown` with text for printable keys, `rawKeyDown` otherwise, then `keyUp`)
@@ -551,13 +597,13 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: yes
 - **Security**: a single-character key is logged as `<char>`, never its value
 
-### 14. `browser_get_url`
+### 16. `browser_get_url`
 - **Input**: none
 - **Output**: `{ url, title, readyState }`
 - **CDP Commands**: `Runtime.evaluate`
 - **Behavior**: reads `window.location.href`, `document.title` and `document.readyState`. This is how a caller asks where the page currently is — after a click that navigated, or after a same-document (hash) navigation. Read-only, never locked, and it reports `about:blank` after a crash restart (see the `sessionReset` signal)
 
-### 15. `browser_webgl_info`
+### 17. `browser_webgl_info`
 - **Input**: none
 - **Output**: `{ usable, effective, webgl, webgl2, offscreen, interfaces, shim, reason?, advice?, consoleHits? }`
 - **CDP Commands**: `Runtime.callFunctionOn` (`IN_PAGE.webglInfo`)
@@ -565,14 +611,14 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: no
 - **Security**: runs a fixed expression, never user input; not gated (diagnosis is not a privileged act)
 
-### 16. `browser_canvas_info`
+### 18. `browser_canvas_info`
 - **Input**: `max_canvases` (optional, default `MAX_WEBGL_CANVASES` = 50, hard cap 200)
 - **Output**: `{ count, blank, sampled, truncated, canvases[] }`
 - **CDP Commands**: `Runtime.callFunctionOn` (`IN_PAGE.canvasInfo`)
 - **Behavior**: per canvas — attribute vs. CSS size, viewport position, `mockContextType`, `dataUrlLength`, and a pixel sample (drawn into an offscreen 2D canvas at ≤64×64) giving `uniqueColors`, `nonTransparentRatio` and `blank`. Each entry carries a plain-language `verdict`; a shim-served canvas is reported as blank *on purpose* rather than broken
 - **Locked**: no
 
-### 17. `browser_webgl_shim`
+### 19. `browser_webgl_shim`
 - **Input**: `mode` (`off` | `mock` | `trace`), `reload` (default true), `timeout_ms`
 - **Output**: `{ mode, identifier, shimmed, appliesTo, reloadRequired, reloaded, note? }`
 - **CDP Commands**: `Page.addScriptToEvaluateOnNewDocument`, `Page.removeScriptToEvaluateOnNewDocument`, `Page.reload` + `Page.loadEventFired`
@@ -581,7 +627,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Locked**: yes
 - **Security**: gated behind `ENABLE_WEBGL_SHIM`; source is static text from `src/webgl.js`; every result carries `shimmed: true`
 
-### 18. `browser_webgl_trace`
+### 20. `browser_webgl_trace`
 - **Input**: `clear` (optional, default false)
 - **Output**: `{ available, installed, mode, stats, recordCount, counts, shaders, draws, uniforms, textures, other, note?, cleared? }`
 - **CDP Commands**: `Runtime.evaluate` (`TRACE_SUMMARY_EXPRESSION`, `TRACE_CLEAR_EXPRESSION`)
@@ -589,7 +635,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `WEBGL_TRACE_UNAVAILABLE` when no shim is installed
 - **Locked**: no
 
-### 19. `browser_capture_frames`
+### 21. `browser_capture_frames`
 - **Input**: `count` (1–60, default 4), `interval_ms` (0–5000, default 200), `format`, `quality`, `strategy` (`screencast`|`poll`), `pump` (`screenshot`|`none`), `selector`, `filename_prefix`, `timeout_ms`
 - **Output**: `{ strategy, requested, captured, format, frames[], elapsed_ms, pump?, pumpCount?, clip?, extraCaptured?, shortBy?, note? }`
 - **CDP Commands**: `Page.startScreencast` / `Page.screencastFrame` / `Page.screencastFrameAck` / `Page.stopScreencast`, or `Page.captureScreenshot`
@@ -597,7 +643,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `UNSAFE_PATH`, `SCREENSHOT_TOO_LARGE` (per-frame byte cap), `ELEMENT_HIDDEN`, `ELEMENT_NOT_FOUND`
 - **Locked**: yes
 
-### 20. `browser_webmcp_list_tools`
+### 22. `browser_webmcp_list_tools`
 - **Input**: `max_tools` (optional, default `MAX_WEBMCP_TOOLS` = 64, hard cap 200)
 - **Output**: `{ webmcp, untrusted, count, source, tools[], truncated }` — each tool: `name`, `description`, `inputSchema`, `annotations`, `frameId`
 - **CDP Commands**: `WebMCP.enable`; events `WebMCP.toolsAdded` / `WebMCP.toolsRemoved` (fallback: `Runtime.callFunctionOn` of a static `document.modelContext.getTools()`)
@@ -605,7 +651,7 @@ See `.env.example` for the full documented list (including reserved variables). 
 - **Errors**: `WEBMCP_DISABLED` (gate off), `WEBMCP_UNAVAILABLE`
 - **Locked**: no; page-supplied fields are untrusted
 
-### 21. `browser_webmcp_call_tool`
+### 23. `browser_webmcp_call_tool`
 - **Input**: `name` (string, required), `input` (object, default `{}`), `frame_id` (optional), `timeout_ms` (default 10000)
 - **Output**: `{ webmcp, source, tool, status, untrusted, output }`
 - **CDP Commands**: `WebMCP.invokeTool` + `WebMCP.toolResponded` (+ `WebMCP.cancelInvocation` on timeout); fallback `Runtime.callFunctionOn` of a static `document.modelContext.executeTool()`

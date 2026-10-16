@@ -175,6 +175,7 @@
         <h2>Typed Value Echoes</h2>
         <p>Text input echo: <span id="input-echo" class="echo">(empty)</span></p>
         <p>Textarea echo: <span id="textarea-echo" class="echo">(empty)</span></p>
+        <p>Select echo: <span id="select-echo" class="echo">(none)</span></p>
     </div>
 
     <div id="far-section">
@@ -303,6 +304,14 @@
         if (textareaEl) {
             textareaEl.addEventListener('input', function() { updateEcho('textarea', 'textarea-echo'); });
             textareaEl.addEventListener('change', function() { updateEcho('textarea', 'textarea-echo'); });
+        }
+
+        // Select echo — proves browser_select's change event reaches a page listener.
+        const selectEl = document.getElementById('select');
+        if (selectEl) {
+            selectEl.addEventListener('change', function() {
+                document.getElementById('select-echo').textContent = this.value;
+            });
         }
         
         // Far button (below the fold) for scroll-into-view click testing

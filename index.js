@@ -20,6 +20,7 @@ import { OperationLock, withLock } from './src/lock.js';
 import {
   clickElement,
   typeIntoElement,
+  selectOptionInElement,
   waitForCondition,
   normalizeWhitespace,
   scrollByDirection,
@@ -902,6 +903,43 @@ registerTool(
   }
 );
 
+registerTool(
+  'browser_network',
+  'Get the recent network activity (requests, statuses, and failures)',
+  {
+    filter: z.enum(['all', 'failed']).optional().default('all'),
+    clear_after: z.boolean().optional().default(false)
+  },
+  async ({ filter, clear_after }) => {
+    try {
+      await ensureBrowserReady();
+
+      // Wait for any in-flight navigation to complete
+      if (navigationPromise) {
+        await navigationPromise.catch(() => {});
+      }
+
+      // Never log a URL — it may carry tokens in the query string.
+      process.stderr.write(`[MCP] Getting network activity (filter: ${filter})\n`);
+
+      const result = browser.networkBuffer.getFormatted(filter, clear_after);
+
+      resetIdleTimer();
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(result)
+        }]
+      };
+
+    } catch (err) {
+      process.stderr.write(`[MCP] Network error: ${err.message}\n`);
+      return formatToolError(err);
+    }
+  }
+);
+
 const INTERACTIVE_ROLES = new Set([
   'button', 'link', 'textbox', 'checkbox', 'combobox', 'radio',
   'switch', 'tab', 'slider', 'searchbox', 'spinbutton', 'menuitem',
@@ -1177,6 +1215,80 @@ registerTool(
 
       } catch (err) {
         process.stderr.write(`[MCP] Type error: ${err.message}\n`);
+        return formatToolError(err);
+      }
+    });
+  }
+);
+
+registerTool(
+  'browser_select',
+  'Select an option in a <select> element by value, label, or index',
+  {
+    selector: z.string(),
+    value: z.string().optional(),
+    label: z.string().optional(),
+    index: z.number().int().min(0).optional(),
+    timeout_ms: z.number().max(CONFIG.MAX_TIMEOUT_MS).optional().default(CONFIG.TOOL_DEFAULT_TIMEOUT_MS)
+  },
+  async (args) => {
+    const { selector, value, label, index, timeout_ms } = args;
+
+    // Validate the RAW arguments (not the Zod-normalized object) so "provided"
+    // and "defaulted" stay distinguishable — the same rationale as
+    // src/viewport.js#resolveViewportParams.
+    const provided = [value, label, index].filter(v => v !== undefined).length;
+    if (provided === 0) {
+      return formatToolError(toolError(
+        ERRORS.INVALID_ARGS,
+        'Provide one of "value", "label", or "index"'
+      ));
+    }
+    if (provided > 1) {
+      return formatToolError(toolError(
+        ERRORS.INVALID_ARGS,
+        'Provide exactly one of "value", "label", or "index"'
+      ));
+    }
+
+    return runLocked(async () => {
+      try {
+        await ensureBrowserReady();
+
+        if (navigationPromise) {
+          await navigationPromise.catch(() => {});
+        }
+
+        const timeout = capTimeout(timeout_ms, 10000);
+        // The value/label may be sensitive; log only the selector.
+        process.stderr.write(`[MCP] Selecting in element: ${selector}\n`);
+
+        const result = await selectOptionInElement(browser, selector, {
+          value: value ?? null,
+          label: label ?? null,
+          index: index ?? null,
+          timeoutMs: timeout
+        });
+        resetIdleTimer();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              selected: true,
+              selector,
+              value: result.value,
+              label: result.label,
+              index: result.index
+            })
+          }]
+        };
+
+      } catch (err) {
+        // Never log err.message here: OPTION_NOT_FOUND embeds the value/label,
+        // which may be sensitive. Log the selector (already written above) plus
+        // the stable code only.
+        process.stderr.write(`[MCP] Select error: ${err.code || 'ERROR'}\n`);
         return formatToolError(err);
       }
     });

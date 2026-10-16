@@ -1,7 +1,7 @@
 // src/helpers.js
 // ---------------------------------------------------------------------------
 // In-page JavaScript helper functions for the interaction tools
-// (browser_click, browser_type, browser_wait_for).
+// (browser_click, browser_type, browser_select, browser_wait_for).
 //
 // SECURITY MODEL
 // --------------
@@ -237,6 +237,41 @@ export const IN_PAGE = {
       this.dispatchEvent(new Event('change', { bubbles: true }));
     }
     return this.isContentEditable ? this.textContent : this.value;
+  }`,
+
+  // Choose an option in a <select> by value | label | index, then dispatch
+  // input/change so framework listeners observe the change. `this` is the
+  // select; the three criteria are passed as CDP arguments (never concatenated).
+  selectOption: `function(value, label, index) {
+    if (!this || this.tagName.toLowerCase() !== 'select') {
+      return { error: 'not-a-select' };
+    }
+    const options = Array.from(this.options);
+    let option = null;
+    if (index !== null && index !== undefined) {
+      option = options[index] || null;
+    } else if (value !== null && value !== undefined) {
+      option = options.find(o => o.value === value) || null;
+    } else if (label !== null && label !== undefined) {
+      option = options.find(o => o.textContent.trim() === String(label).trim()) || null;
+    }
+    if (!option) {
+      return { error: 'option-not-found' };
+    }
+    const target = option;
+    try { this.focus(); } catch (e) { /* not focusable — selection still applies */ }
+    // Set the option's selected property rather than assigning this.value: some
+    // engines mishandle the value setter for options whose value attribute is
+    // absent or duplicated.
+    target.selected = true;
+    this.dispatchEvent(new Event('input', { bubbles: true }));
+    this.dispatchEvent(new Event('change', { bubbles: true }));
+    return {
+      selected: true,
+      value: this.value,
+      label: target.textContent.trim(),
+      index: this.selectedIndex
+    };
   }`,
 
   // Whitespace normalization used for text matching (whitespace only — no
@@ -962,6 +997,51 @@ export async function typeIntoElement(browser, selector, text, options = {}) {
 }
 
 /**
+ * Resolve a <select> and choose one option by value, label, or index. Dispatches
+ * input/change so framework listeners observe the change. Returns
+ * { value, label, index }.
+ *
+ * Throws ELEMENT_NOT_FOUND, ELEMENT_HIDDEN, ELEMENT_NOT_SELECT, OPTION_NOT_FOUND.
+ */
+export async function selectOptionInElement(browser, selector, options = {}) {
+  const { value = null, label = null, index = null, timeoutMs = 10000 } = options;
+  const elementId = await waitForElement(browser, selector, timeoutMs);
+
+  const visible = await isElementVisible(browser, elementId);
+  if (!visible) {
+    throw elementHiddenError(
+      selector,
+      'It must be rendered before its value can be set.'
+    );
+  }
+
+  const result = await callHelper(browser, IN_PAGE.selectOption, {
+    objectId: elementId,
+    args: [value, label, index],
+    returnByValue: true
+  });
+
+  const out = result.value || {};
+  if (out.error === 'not-a-select') {
+    throw helperError(`Element is not a <select>: ${selector}`, 'ELEMENT_NOT_SELECT');
+  }
+  if (out.error === 'option-not-found') {
+    const criteria = index !== null
+      ? `index=${index}`
+      : value !== null
+        ? `value="${value}"`
+        : `label="${label}"`;
+    throw helperError(
+      `No matching option in ${selector} for ${criteria}`,
+      'OPTION_NOT_FOUND'
+    );
+  }
+
+  await waitForSettle(browser).catch(() => {});
+  return { value: out.value, label: out.label, index: out.index };
+}
+
+/**
  * High-level wait: poll for selector existence and/or page text.
  * Returns elapsed milliseconds once all requested conditions are met.
  */
@@ -1296,6 +1376,7 @@ export default {
   waitForText,
   clickElement,
   typeIntoElement,
+  selectOptionInElement,
   waitForCondition,
   isHovered,
   hoverElement,
